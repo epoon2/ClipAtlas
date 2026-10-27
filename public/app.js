@@ -148,7 +148,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||r.auto.reason||'')}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||[r.auto.reason,r.auto.detail].filter(Boolean).join(': '))}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -610,7 +610,7 @@
     li.className=ok?'ok':'not';
     const title=document.createElement('strong');title.textContent=ok?(r.title||'Untitled'):(r.title||'A clip');
     li.append(title,document.createTextNode(ok?` → ${emojiFor(r.category)} ${r.category}${res.heard||res.seen?' (from '+[res.heard&&'what was said',res.seen&&'what was shown'].filter(Boolean).join(' and ')+')':''}`
-      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}`));
+      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}${res.detail?' ('+res.detail+')':''}`));
     const list=$('#autoResults');list.prepend(li);while(list.children.length>8)list.lastChild.remove();
   }
   async function startAuto(){
@@ -668,7 +668,8 @@
         commit();await persist();
         if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';break;}
         auto.failsInRow=res.status==='failed'?auto.failsInRow+1:0;
-        if(auto.failsInRow>=3){stopReason='Three clips in a row failed, so auto-review stopped. Try again later.';break;}
+        if(res.detail)auto.lastDetail=res.detail;
+        if(auto.failsInRow>=3){stopReason=`Three clips in a row failed, so auto-review stopped.${auto.lastDetail?' Last problem: '+auto.lastDetail+'.':''} "Check the AI setup" tests each step.`;break;}
       }
     }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
     finally{
@@ -696,15 +697,48 @@
   function autoShot(frame){
     const v=auto.video;if(!v||!v.videoWidth)return null;
     const box=frame.getBoundingClientRect(),sx=v.videoWidth/window.innerWidth,sy=v.videoHeight/window.innerHeight;
-    const w=270,h=480,c=document.createElement('canvas');c.width=w;c.height=h;
+    const w=360,h=640,c=document.createElement('canvas');c.width=w;c.height=h;
     c.getContext('2d').drawImage(v,box.left*sx,box.top*sy,box.width*sx,box.height*sy,0,0,w,h);
     return c;
   }
-  function autoGrid(shots){
-    if(!shots.length)return '';
-    const c=document.createElement('canvas');c.width=270*shots.length;c.height=480;
-    const g=c.getContext('2d');shots.forEach((s,i)=>g.drawImage(s,i*270,0));
-    return c.toDataURL('image/jpeg',0.82);
+  // Sheets of up to three screenshots side by side, at most four sheets (twelve
+  // screenshots; a longer slideshow is sampled evenly, first and last kept).
+  function autoSheets(shots){
+    let pick=shots;
+    if(shots.length>12)pick=Array.from({length:12},(_,i)=>shots[Math.round(i*(shots.length-1)/11)]);
+    const sheets=[];
+    for(let i=0;i<pick.length;i+=3){
+      const part=pick.slice(i,i+3),c=document.createElement('canvas');c.width=360*part.length;c.height=640;
+      const g=c.getContext('2d');part.forEach((s,j)=>g.drawImage(s,j*360,0));
+      sheets.push(c.toDataURL('image/jpeg',0.8));
+    }
+    return sheets;
+  }
+  function wavBase64(samples){
+    const bytes=C.wavBytes(samples,16000);let bin='';
+    for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
+    return btoa(bin);
+  }
+  // "Check the AI setup": each model once on a 1-second tone and a picture with words on it.
+  async function checkSetup(){
+    const btn=$('#aiCheckBtn'),out=$('#aiCheckOut');btn.disabled=true;out.replaceChildren();out.hidden=false;
+    const wait=document.createElement('li');wait.textContent='Checking each step (about 10 seconds)…';out.append(wait);
+    const tone=new Float32Array(16000);for(let i=0;i<tone.length;i++)tone[i]=0.3*Math.sin(2*Math.PI*440*i/16000);
+    const c=document.createElement('canvas');c.width=360;c.height=640;const g=c.getContext('2d');
+    g.fillStyle='#1d6b5a';g.fillRect(0,0,360,640);g.fillStyle='#fff';g.font='bold 40px sans-serif';
+    g.fillText('BEST NOODLES',24,290);g.fillText('IN TAIPEI',24,345);
+    let data;
+    try{
+      const res=await fetch('/api/aicheck',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+        body:JSON.stringify({audio:wavBase64(tone),image:c.toDataURL('image/jpeg',0.85)})});
+      data=await res.json().catch(()=>({}));
+      if(!data.steps)data={steps:[{step:'server',ok:false,detail:data.error||('answered '+res.status)}]};
+    }catch(err){data={steps:[{step:'connection',ok:false,detail:String(err&&err.message||err)}]};}
+    const names={listen:'Listen (speech to text)',look:'Look (reading screenshots)',decide:'Decide (filling in details)'};
+    out.replaceChildren(...data.steps.map(st=>{const li=document.createElement('li');li.className=st.ok?'ok':'not';
+      const b=document.createElement('strong');b.textContent=`${st.ok?'✓':'✗'} ${names[st.step]||st.step}`;
+      li.append(b,document.createTextNode(` ${st.ms?'· '+(st.ms/1000).toFixed(1)+'s ':''}· ${st.ok?st.said:st.detail}`));return li;}));
+    btn.disabled=false;
   }
   // The recorded sound as base64 WAV pieces of at most 55 seconds, quiet pieces left out.
   function autoAudio(){
@@ -714,9 +748,7 @@
     const pcm=C.downsample(all,auto.ctx.sampleRate,16000),out=[];
     for(const [a,b] of C.pieces(pcm.length,16000,55)){
       const part=pcm.subarray(a,b);if(part.length<16000*0.8||C.loudness(part)<0.002)continue;
-      const bytes=C.wavBytes(part,16000);let bin='';
-      for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
-      out.push(btoa(bin));
+      out.push(wavBase64(part));
     }
     return out;
   }
@@ -738,15 +770,27 @@
       frame.src=C.playerUrl(r,{auto:true});frame.title='TikTok video player';
       frame.allow='autoplay; encrypted-media; fullscreen';frame.referrerPolicy='strict-origin-when-cross-origin';
       box.replaceChildren(frame);
+      let lastError=null;
       const started=Date.now();let ready=0,lastTick=0,limit=auto.cap,times=null,shots=[],timeEvents=false,unmutes=0,triedPlay=false,finished=false,now=0;
-      const send=type=>{try{frame.contentWindow.postMessage({type,value:null,'x-tiktok-player':true},'https://www.tiktok.com');}catch(_){}};
+      // A slideshow (photo post): walk every slide with the player's navigateTo and screenshot each one.
+      let slides=false,want=-1,askedAt=0,probed=false,slideTimer=null;
+      const send=(type,value=null)=>{try{frame.contentWindow.postMessage({type,value,'x-tiktok-player':true},'https://www.tiktok.com');}catch(_){}};
+      const MAX_SLIDES=20;
+      const goTo=i=>{want=i;askedAt=Date.now();send('navigateTo',i);autoSay(`Reading slide ${i+1}…`);};
+      const onSlide=i=>{
+        if(!slides){slides=true;shots=[];send('pause');goTo(0);if(i===0)onSlide(0);return;}
+        if(i!==want||slideTimer)return;
+        // Let the slide finish drawing before the screenshot.
+        slideTimer=setTimeout(()=>{slideTimer=null;shoot();if(want+1>=MAX_SLIDES)finish('SLIDES');else goTo(want+1);},800);
+      };
       const shoot=()=>{const s=autoShot(frame);if(s)shots.push(s);};
       const finish=reason=>{
         if(finished)return;finished=true;
         clearInterval(timer);window.removeEventListener('message',onMessage);
         auto.recording=false;try{auto.node.port.postMessage({record:false});}catch(_){}
         send('pause');auto.finishClip=null;
-        resolve({reason,shots,played:now});
+        clearTimeout(slideTimer);
+        resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError});
       };
       auto.finishClip=finish;
       const startListening=()=>{if(auto.recording)return;auto.chunks=[];auto.recording=true;auto.node.port.postMessage({record:true});};
@@ -756,12 +800,14 @@
         if(!d||typeof d.type!=='string')return;
         const v=d.value&&typeof d.value==='object'?d.value:d;
         if(d.type==='onPlayerReady'){if(!ready){ready=Date.now();send('unMute');send('play');startListening();}}
+        else if(d.type==='onImageChange'){const i=Number(d.value&&typeof d.value==='object'?d.value.index??d.value.value:d.value);if(isFinite(i))onSlide(i);}
         else if(d.type==='onMute'&&d.value===true&&unmutes<3){unmutes++;send('unMute');}
         else if(d.type==='onStateChange'&&Number(d.value)===1)startListening();
         else if(d.type==='onStateChange'&&Number(d.value)===0)finish('ENDED');
         else if(d.type==='onCurrentTime'){
           const t=Number(v.currentTime),dur=Number(v.duration);if(!isFinite(t))return;
           timeEvents=true;lastTick=Date.now();now=t;startListening();
+          if(slides)return;  // a slideshow's music: the slides decide when it is done
           if(!times&&dur>0){limit=Math.min(dur,auto.cap);times=C.shotTimes(limit);}
           while(times&&times.length&&t>=times[0]){times.shift();shoot();}
           autoSay(`Listening and looking · ${Math.floor(t)}s of ${Math.ceil(limit)}s`);
@@ -770,7 +816,7 @@
         else if(d.type==='onPlayerError'||d.type==='onError'){
           const code=Number(v.errorCode??d.value);
           if(code===3002&&!triedPlay){triedPlay=true;send('play');return;}
-          finish(code===1001?'NOT_FOUND':code===3002?'AUTOPLAY':'PLAYBACK');
+          lastError=code;finish(code===1001?'NOT_FOUND':code===3002?'AUTOPLAY':'PLAYBACK');
         }
       };
       window.addEventListener('message',onMessage);
@@ -779,6 +825,13 @@
       const timer=setInterval(()=>{
         const t=Date.now();
         if(!ready&&t-started>20000)return finish('NO_PLAYER');
+        // Ask for slide 2 once: a slideshow answers with onImageChange; a video ignores it.
+        if(ready&&!probed&&t-ready>1200){probed=true;send('navigateTo',1);}
+        if(slides){
+          // No answer for the next slide: that was the last one.
+          if(!slideTimer&&t-askedAt>2500){if(!shots.length)shoot();finish('SLIDES');}
+          return;
+        }
         if(ready&&!timeEvents){
           const s=(t-ready)/1000;
           if(s>=2&&shots.length<1)shoot();if(s>=6&&shots.length<2)shoot();if(s>=10&&shots.length<3)shoot();
@@ -794,32 +847,36 @@
     if(played.reason==='SHARING_STOPPED')return {reason:'SHARING_STOPPED'};
     if(played.reason==='STOPPED_BY_PERSON')return {reason:'STOPPED'};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
-      return {status:'unavailable',reason:played.reason==='STALLED'?'STALLED':played.reason};
+      return {status:'unavailable',reason:played.reason,detail:played.error?`player error ${played.error}`:''};
     // 1. What was said: each piece of sound through the speech-to-text model.
-    const parts=autoAudio(),words=[];let listenFailed=false;
+    const parts=autoAudio(),words=[];let listenFailed=false,listenDetail='';
     for(let i=0;i<parts.length;i++){
       autoSay(parts.length>1?`Turning the sound into words (part ${i+1} of ${parts.length})…`:'Turning the sound into words…');
       const heard=await autoPost('transcribe',{audio:parts[i]});
       if(heard.stopRun)return heard;
-      if(heard.status==='transcribed')words.push(heard.text);else if(heard.status==='failed')listenFailed=true;
+      if(heard.status==='transcribed')words.push(heard.text);else if(heard.status==='failed'){listenFailed=true;listenDetail=heard.detail||heard.reason;}
     }
     const transcript=words.join(' ').trim().slice(0,4000);
     if(auto.mode==='transcript'){
       if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript};
-      return listenFailed?{status:'failed',reason:'AI_FAILED'}:{status:'empty',reason:'NOTHING_SAID'};
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_SAID'};
     }
     // 2. What it is about: the transcript and the screenshots.
-    const image=autoGrid(played.shots);
-    if(!transcript&&!image)return listenFailed?{status:'failed',reason:'AI_FAILED'}:{status:'empty',reason:'NOTHING_TO_READ'};
-    autoSay('Working out what it is about…');
-    const data=await autoPost('understand',{transcript,image,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
+    const images=autoSheets(played.shots);
+    const trace={clip:r.id,ended:played.reason,slides:played.slides,screenshots:played.shots.length,soundParts:parts.length,heardWords:transcript.length,listenDetail};
+    if(!transcript&&!images.length){console.info('ClipAtlas auto-review',trace);
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_TO_READ'};}
+    autoSay(played.slides?`Reading ${played.slides} slide${played.slides===1?'':'s'}…`:'Working out what it is about…');
+    const data=await autoPost('understand',{transcript,images,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
+    console.info('ClipAtlas auto-review',{...trace,result:data.status,reason:data.reason,detail:data.detail});
     if(data.stopRun)return data;
-    return {...data,transcript};
+    return {...data,transcript,detail:[data.detail,listenFailed&&listenDetail].filter(Boolean).join('; ')};
   }
   function stopAuto(){if(auto){auto.stop=true;autoSay('Stopping…');auto.finishClip?.('STOPPED_BY_PERSON');}}
   function initAuto(){
     const dlg=$('#autoDialog');
     $('#startAuto').addEventListener('click',openAuto);
+    $('#aiCheckBtn').addEventListener('click',checkSetup);
     $('#autoStart').addEventListener('click',startAuto);
     $('#autoStop').addEventListener('click',stopAuto);
     for(const id of ['autoScope','autoCap'])$('#'+id).addEventListener('change',autoEstimate);

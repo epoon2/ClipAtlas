@@ -85,3 +85,4 @@
 .review-heard p{margin:0 0 10px;font-size:13px;line-height:1.55;color:#294b49;max-height:160px;overflow:auto;white-space:pre-wrap}.review-heard p:last-child{margin-bottom:0}
 @media(max-width:600px){.bulk-gap{display:none}.bulk-bar{bottom:8px}.bulk-bar select{max-width:100%;flex:1}}
 .toast{z-index:60}body.selecting .toast{bottom:96px}
+.ai-check{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 8px}#aiCheckOut{margin-bottom:10px}#aiCheckOut li{word-break:break-word}

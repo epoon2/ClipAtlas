@@ -377,7 +377,8 @@
     if (!a || typeof a !== 'object' || !AUTO_STATUSES.includes(a.status)) return undefined;
     return { status: a.status, reason: safeString(a.reason).slice(0, 40), at: safeString(a.at).slice(0, 40),
       heard: !!a.heard, seen: !!a.seen, transcript: safeString(a.transcript).slice(0, 4000),
-      onScreen: safeString(a.onScreen).slice(0, 600), summary: safeString(a.summary).slice(0, 240) };
+      onScreen: safeString(a.onScreen).slice(0, 1500), summary: safeString(a.summary).slice(0, 240),
+      detail: safeString(a.detail).slice(0, 180) };
   }
   function cleanAutoSorted(a) {
     if (!a || typeof a !== 'object' || !safeString(a.name)) return undefined;
@@ -452,6 +453,8 @@
       the person wrote is never replaced. */
   function applyUnderstanding(record, result, { markReviewed = true, now = isoNow() } = {}) {
     const res = result || {};
+    // A later run that heard or saw nothing does not wipe what an earlier one found.
+    if (!['understood', 'transcribed'].includes(res.status) && record.auto && record.auto.status === 'understood') return record;
     const next = { ...record, tags: [...(record.tags || [])] };
     next.auto = cleanAuto({ ...res, status: AUTO_STATUSES.includes(res.status) ? res.status : 'failed', at: now });
     next.updatedAt = now;

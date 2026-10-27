@@ -1,6 +1,6 @@
 // ClipAtlas API — Cloudflare Worker + D1, with a private library per account.
 import {readTikTokLink,lookupTikTok,MESSAGES} from './tiktok.js';
-import {readUnderstandRequest,understandClip,readTranscribeRequest,transcribeAudio,MESSAGES as UNDERSTAND} from './understand.js';
+import {readUnderstandRequest,understandClip,readTranscribeRequest,transcribeAudio,checkAI,MESSAGES as UNDERSTAND} from './understand.js';
 const encoder = new TextEncoder();
 const JSON_HEADERS = {'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
 const MAX_STATE = 2 * 1024 * 1024;
@@ -72,6 +72,13 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   if(await blocked(env,(listen?'transcribe:':'understand:')+user.id,daily,86400000))return response({error:`Auto-review limit reached (${clips} clips a day); continue tomorrow.`,status:'failed',reason:'CLIPATLAS_LIMIT'},429);
   const result=listen?await transcribeAudio(request.audio,env.AI):await understandClip(request,env.AI);
   return response(result,result.reason==='AI_DAILY_LIMIT'?429:200);
+ }
+ // Auto-review setup check: each model once on a tiny test sound and picture, with the real error if one fails.
+ if(path==='/api/aicheck'&&method==='POST'){
+  if(!env.AI)return response({ok:false,steps:[{step:'setup',ok:false,detail:'setup: no Workers AI binding (deploy with the [ai] section in wrangler.toml)'}]},503);
+  let body;try{body=await jsonBody(req,900000);}catch{return response({error:UNDERSTAND.BAD_INPUT},400);}
+  if(await blocked(env,'aicheck:'+user.id,30,86400000))return response({error:'Setup check limit reached (30 a day).'},429);
+  return response(await checkAI(body,env.AI));
  }
  if(path==='/api/library'&&method==='GET'){
   const found=await env.DB.prepare('SELECT json,revision FROM libraries WHERE user_id=?').bind(user.id).first();return response({state:found?JSON.parse(found.json):null,revision:found?.revision||0});
