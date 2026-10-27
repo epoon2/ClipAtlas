@@ -1,4 +1,5 @@
 // ClipAtlas API — Cloudflare Worker + D1, with a private library per account.
+import {readTikTokLink,lookupTikTok,MESSAGES} from './tiktok.js';
 const encoder = new TextEncoder();
 const JSON_HEADERS = {'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
 const MAX_STATE = 2 * 1024 * 1024;
@@ -15,7 +16,7 @@ function cookie(name,val,maxAge){return `${name}=${val}; Path=/; HttpOnly; Secur
 function originOK(req){const o=req.headers.get('origin');if(!o)return false;try{return new URL(o).origin===new URL(req.url).origin;}catch{return false;}}
 async function jsonBody(req,max=MAX_STATE+1024){const len=Number(req.headers.get('content-length')||0);if(len>max)throw new Error('Request too large');const text=await req.text();if(text.length>max)throw new Error('Request too large');return JSON.parse(text);}
 async function getUser(req,env){const raw=/(?:^|;\s*)clipatlas_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.get('cookie')||'');if(!raw)return null;const tokenHash=await digest(raw[1]);return env.DB.prepare('SELECT u.id,u.email,u.display_name,s.expires_at FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token_hash=?').bind(tokenHash).first().then(x=>x&&x.expires_at>Date.now()?x:null);}
-function validateState(s){if(!s||typeof s!=='object'||Array.isArray(s)||s.version!==1||!Array.isArray(s.records)||!Array.isArray(s.collections)||!Array.isArray(s.plan))return false;if(s.records.length>10000||s.plan.length>20000||s.collections.length>1000)return false;return true;}
+function validateState(s){if(!s||typeof s!=='object'||Array.isArray(s)||s.version!==1||!Array.isArray(s.records)||!Array.isArray(s.collections)||!Array.isArray(s.plan))return false;if(s.records.length>10000||s.plan.length>20000||s.collections.length>1000)return false;if(s.categories!==undefined&&(!Array.isArray(s.categories)||s.categories.length>100))return false;if(s.settings!==undefined&&(!s.settings||typeof s.settings!=='object'||Array.isArray(s.settings)))return false;return true;}
 async function handle(req,env){const url=new URL(req.url),path=url.pathname,method=req.method;
  if(!path.startsWith('/api/'))return env.ASSETS.fetch(req);
  if(method!=='GET'&&!originOK(req))return bad('Invalid origin',403);
@@ -47,23 +48,15 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   const raw=/(?:^|;\s*)clipatlas_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.get('cookie')||'');if(raw)await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(raw[1])).run();
   return response({ok:true},200,{'set-cookie':cookie('clipatlas_session','',0)});
  }
- // Authenticated public metadata lookup. URL is never used as a fetch destination:
- // requests go exclusively to TikTok's documented oEmbed endpoint.
+ // Authenticated public metadata lookup (src/tiktok.js). The link is cleaned and
+ // must be a TikTok video, photo or short link; requests go only to TikTok hosts
+ // (to follow TikTok's own redirect from a share link) and to TikTok's oEmbed.
  if(path==='/api/enrich'&&method==='POST'){
   let body;try{body=await jsonBody(req,2048);}catch{return bad('Invalid request');}
-  const candidate=String(body.url||'');let target;
-  try{target=new URL(candidate);}catch{return bad('Invalid TikTok URL');}
-  if(target.protocol!=='https:'||!['www.tiktok.com','m.tiktok.com','vm.tiktok.com','vt.tiktok.com','tiktok.com'].includes(target.hostname)||candidate.length>800||target.username||target.password)return bad('Only HTTPS TikTok links are accepted');
-  const ip=req.headers.get('cf-connecting-ip')||'unknown';
-  if(await blocked(env,'enrich:'+user.id,180,3600000))return bad('Metadata lookup limit reached; retry in an hour',429);
-  const endpoint='https://www.tiktok.com/oembed?url='+encodeURIComponent(candidate);
-  let upstream;
-  try{upstream=await fetch(endpoint,{headers:{'accept':'application/json'},redirect:'follow',signal:AbortSignal.timeout(10000)});}catch{return response({available:false,reason:'TikTok metadata is temporarily unavailable'});}
-  if(!upstream.ok)return response({available:false,reason:'TikTok did not provide public metadata for this link'});
-  const raw=await upstream.text();if(raw.length>100000)return bad('Invalid metadata response',502);
-  let data;try{data=JSON.parse(raw);}catch{return bad('Invalid metadata response',502);}
-  if(data.provider_name!=='TikTok')return bad('Unexpected metadata provider',502);
-  return response({available:true,title:String(data.title||'').slice(0,450),creator:String(data.author_name||'').slice(0,160),thumbnail:String(data.thumbnail_url||'').slice(0,1000),source:'TikTok public oEmbed'});
+  const link=readTikTokLink(body.url);
+  if(!link.ok)return response({error:MESSAGES[link.reason],status:'rejected',reason:link.reason,retryable:false,available:false},400);
+  if(await blocked(env,'enrich:'+user.id,180,3600000))return response({error:'Metadata lookup limit reached; retry in an hour',status:'failed',reason:'CLIPATLAS_LIMIT',retryable:true,available:false},429);
+  return response(await lookupTikTok(body.url));
  }
  if(path==='/api/library'&&method==='GET'){
   const found=await env.DB.prepare('SELECT json,revision FROM libraries WHERE user_id=?').bind(user.id).first();return response({state:found?JSON.parse(found.json):null,revision:found?.revision||0});
