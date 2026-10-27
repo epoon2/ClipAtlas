@@ -24,11 +24,19 @@
 // a short `detail` (which step, and the service's own message) for the page.
 
 export const WHISPER = '@cf/openai/whisper-large-v3-turbo';
-export const VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
-export const TEXT = '@cf/meta/llama-3.1-8b-instruct';   // supports JSON mode
+// Workers AI retires models now and then (the first text model this used,
+// llama-3.1-8b-instruct, was retired in May 2026), so each step has a short
+// list: the first one that answers is used, and a retired or missing one is
+// skipped. All are on Cloudflare's model list as of October 2026.
+export const VISION_MODELS = ['@cf/meta/llama-4-scout-17b-16e-instruct', '@cf/meta/llama-3.2-11b-vision-instruct',
+  '@cf/mistralai/mistral-small-3.1-24b-instruct'];
+export const TEXT_MODELS = ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/meta/llama-3.1-8b-instruct-fp8',
+  '@cf/google/gemma-4-26b-a4b-it'];
+export const VISION = VISION_MODELS[0];
+export const TEXT = TEXT_MODELS[0];
 
 export const LIMITS = { audio: 3_200_000, image: 1_500_000, images: 4, transcript: 4000, piece: 2000, prompt: 3000,
-  seen: 1500, onScreen: 1500, summary: 240, title: 100, place: 100, tag: 30, tags: 6, categories: 100, detail: 180 };
+  seen: 1500, onScreen: 1500, summary: 240, title: 100, place: 100, tag: 30, tags: 6, categories: 100, detail: 300 };
 
 // Cheap checks only: a full scan of a 2 MB string costs too much CPU on the
 // Workers Free plan (10 ms a request), and Workers AI refuses bad data anyway.
@@ -83,32 +91,35 @@ export async function transcribeAudio(audio, ai) {
 
 /* ---- look: the vision model, in plain words ----------------------------- */
 
-// Workers AI's documents show the picture as a data URL; other examples send
-// the bare base64 or the bytes. Try them in that order and remember the one
-// that works, so one wrong guess costs one extra request per Worker instance.
-const IMAGE_FORMATS = ['dataUrl', 'base64', 'bytes'];
-let imageFormat = null;
-let agreed = false;  // the vision model's license is accepted once per Worker instance
-/** For tests: forget the picture format and the license, as a fresh Worker instance would. */
-export function resetForTests() { imageFormat = null; agreed = false; }
+// How the picture goes with the question differs between vision models and
+// is not fully documented: try each model with each way in turn, and keep the
+// first pair that works for the rest of this Worker instance. A retired model
+// is skipped at once. If nothing works, say so for ten minutes instead of
+// trying every pair again for each clip.
+const LOOK_WAYS = {
+  'prompt + base64': (p, url) => ({ prompt: p, image: url.slice(JPEG_PREFIX.length) }),
+  'message parts': (p, url) => ({ messages: [{ role: 'user', content: [{ type: 'text', text: p }, { type: 'image_url', image_url: { url } }] }] }),
+  'messages + image': (p, url) => ({ messages: [{ role: 'user', content: p }], image: url }),
+  'prompt + data URL': (p, url) => ({ prompt: p, image: url }),
+};
+let lookWay = null;      // {model, way} that worked
+let lookBroken = null;   // {until, message} after every pair failed
+let decideModel = null;  // the text model that worked
+const agreed = {};       // models whose license was accepted
+/** For tests: forget what worked, as a fresh Worker instance would. */
+export function resetForTests() { lookWay = null; lookBroken = null; decideModel = null; for (const k of Object.keys(agreed)) delete agreed[k]; }
 
-function imageInput(dataUrl, format) {
-  if (format === 'dataUrl') return dataUrl;
-  const b64 = dataUrl.slice(JPEG_PREFIX.length);
-  if (format === 'base64') return b64;
-  const bin = atob(b64), bytes = new Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-const inputProblem = err => /5006|oneof|one of|invalid|schema|input|decode|image|type|format|base64/i.test(errorText(err));
+const NO_PICTURE = /\b(?:no|not any|without (?:an?|any)) (?:images?|screenshots?|pictures?)\b.{0,30}\b(?:provided|attached|shared|included|given|uploaded)|\b(?:can(?:no|')t|unable to|do(?:n'| no)t) (?:see|view|access|process) (?:the |any )?(?:images?|screenshots?|pictures?)/i;
+const modelGone = err => /5028|5007|deprecat|no such model|not found|unknown model|does not exist|not available/i.test(errorText(err));
+const shortName = model => model.split('/').pop();
 
-async function runVision(ai, input) {
-  try { return await ai.run(VISION, input); }
+async function runModel(ai, model, input) {
+  try { return await ai.run(model, input); }
   catch (err) {
-    if (agreed || !/agree/i.test(errorText(err))) throw err;
-    agreed = true;
-    await ai.run(VISION, { prompt: 'agree' });
-    return ai.run(VISION, input);
+    if (agreed[model] || !/agree/i.test(errorText(err))) throw err;
+    agreed[model] = true;
+    await ai.run(model, { prompt: 'agree' });
+    return ai.run(model, input);
   }
 }
 
@@ -130,22 +141,31 @@ export function readLook(reply) {
     onScreen: /^none\.?$/i.test(onScreen) ? '' : clip(onScreen, LIMITS.onScreen) };
 }
 
-/** What one sheet of screenshots shows. Throws the service's error. */
+/** What one sheet of screenshots shows: {shows, onScreen, way}. Throws the service's error. */
 export async function look(ai, dataUrl) {
-  const formats = imageFormat ? [imageFormat] : IMAGE_FORMATS;
-  let last;
-  for (const format of formats) {
+  if (lookBroken && Date.now() < lookBroken.until) throw new Error(lookBroken.message);
+  const tries = lookWay ? [lookWay] : VISION_MODELS.flatMap(model => Object.keys(LOOK_WAYS).map(way => ({ model, way })));
+  const problems = {};
+  for (const t of tries) {
+    if (problems[t.model] && problems[t.model].gone) continue;
     try {
-      const reply = await runVision(ai, { messages: [{ role: 'user', content: LOOK_PROMPT }],
-        image: imageInput(dataUrl, format), max_tokens: 700, temperature: 0.1 });
-      imageFormat = format;
-      return readLook(reply);
+      const reply = await runModel(ai, t.model, { ...LOOK_WAYS[t.way](LOOK_PROMPT, dataUrl), max_tokens: 700, temperature: 0.1 });
+      const seen = readLook(reply);
+      if (!seen.shows && !seen.onScreen) throw new Error('the reply was empty');
+      // A way that drops the picture without an error shows up as a model saying it has none.
+      if (NO_PICTURE.test(`${seen.shows} ${seen.onScreen}`)) throw new Error('the model did not get the picture');
+      lookWay = t;
+      return { ...seen, way: `${shortName(t.model)}, ${t.way}` };
     } catch (err) {
-      last = err;
-      if (isLimit(err) || !inputProblem(err)) throw err;
+      if (isLimit(err)) throw err;
+      if (!problems[t.model]) problems[t.model] = { message: errorText(err).slice(0, 140) };
+      if (modelGone(err)) problems[t.model].gone = true;
     }
   }
-  throw last;
+  if (lookWay) { const was = lookWay; lookWay = null; throw new Error(`${shortName(was.model)}: ${problems[was.model].message}`); }
+  const message = Object.entries(problems).map(([m, p]) => `${shortName(m)}: ${p.message}`).join(' | ');
+  lookBroken = { until: Date.now() + 10 * 60 * 1000, message };
+  throw new Error(message);
 }
 
 /* ---- decide: the text model, in JSON mode -------------------------------- */
@@ -219,18 +239,31 @@ export function cleanAnswer(raw, categories) {
     country: clip(a.country, LIMITS.place), tags };
 }
 
-/** The details, in JSON mode; if JSON mode cannot be met, asked again without it. Throws the service's error. */
+/** The details, in JSON mode (asked again without it if JSON mode cannot be
+    met), from the first text model that answers. Throws the service's error. */
 export async function decide(ai, prompt) {
   const input = { messages: [{ role: 'user', content: prompt }], max_tokens: 500, temperature: 0.2 };
-  let reply;
-  try { reply = await ai.run(TEXT, { ...input, response_format: { type: 'json_schema', json_schema: SCHEMA } }); }
-  catch (err) {
-    if (isLimit(err)) throw err;
-    reply = await ai.run(TEXT, input);
+  const models = decideModel ? [decideModel] : TEXT_MODELS;
+  const problems = [];
+  for (const model of models) {
+    try {
+      let reply;
+      try { reply = await ai.run(model, { ...input, response_format: { type: 'json_schema', json_schema: SCHEMA } }); }
+      catch (err) {
+        if (isLimit(err) || modelGone(err)) throw err;
+        reply = await ai.run(model, input);
+      }
+      const parsed = parseReply(reply && reply.response !== undefined ? reply.response : reply);
+      if (!parsed) throw new Error('the reply had no details in it');
+      decideModel = model;
+      return parsed;
+    } catch (err) {
+      if (isLimit(err)) throw err;
+      problems.push(`${shortName(model)}: ${errorText(err).slice(0, 140)}`);
+      if (decideModel) decideModel = null;
+    }
   }
-  const parsed = parseReply(reply && reply.response !== undefined ? reply.response : reply);
-  if (!parsed) throw new Error('the reply had no details in it');
-  return parsed;
+  throw new Error(problems.join(' | '));
 }
 
 /**
@@ -286,10 +319,12 @@ export async function checkAI(body, ai) {
   await timed('look', async () => {
     if (!image) throw new Error('no test picture was sent');
     const r = await look(ai, image);
-    return `${r.shows} | text: ${r.onScreen || 'none'} | picture sent as ${imageFormat}`;
+    return `${r.shows} | text: ${r.onScreen || 'none'} | using ${r.way}`;
   });
-  await timed('decide', async () => JSON.stringify(cleanAnswer(await decide(ai, buildPrompt(
-    [{ name: 'Food', words: ['noodles'] }, { name: 'Shopping', words: ['mall'] }], 'the best noodles in town', 'A bowl of noodles.')),
-  [{ name: 'Food', words: [] }, { name: 'Shopping', words: [] }])));
+  await timed('decide', async () => {
+    const answer = cleanAnswer(await decide(ai, buildPrompt([{ name: 'Food', words: ['noodles'] }, { name: 'Shopping', words: ['mall'] }],
+      'the best noodles in town', 'A bowl of noodles.')), [{ name: 'Food', words: [] }, { name: 'Shopping', words: [] }]);
+    return `using ${shortName(decideModel || TEXT)}: ${answer.category}, "${answer.title}"`;
+  });
   return { ok: steps.every(s => s.ok), steps };
 }

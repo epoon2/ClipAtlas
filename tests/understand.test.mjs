@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readUnderstandRequest, readTranscribeRequest, transcribeAudio, parseReply, cleanAnswer, understandClip, buildPrompt,
-  readLook, checkAI, resetForTests, WHISPER, VISION, TEXT } from '../src/understand.js';
+  readLook, checkAI, resetForTests, WHISPER, VISION, TEXT, VISION_MODELS, TEXT_MODELS } from '../src/understand.js';
 import worker from '../src/worker.js';
 
 const AUDIO = Buffer.from('RIFF....WAVEfmt fake sound').toString('base64');
@@ -12,17 +12,20 @@ const ANSWER = { title: 'Beef noodle stall in Ximending', summary: 'A creator tr
   place: 'Lin Dong Fang', city: 'Taipei', country: 'Taiwan', tags: ['#Noodles', 'beef', 'noodles'] };
 const LOOKED = 'SHOWS: A bowl of beef noodle soup at a busy stall.\nTEXT: BEST NOODLES 📍Taipei';
 
-// A fake env.AI: Whisper hears, the vision model looks (plain text), the text model decides (JSON).
+// A fake env.AI: Whisper hears, a vision model looks (plain text), a text model decides (JSON).
+// ``fail`` maps a model to an error message, or to a function of the input (return a reply or throw).
 function fakeAI({ said = 'best beef noodles in taipei', looked = LOOKED, reply = JSON.stringify(ANSWER), fail = {} } = {}) {
   const calls = [];
   return { calls, async run(model, input) {
     calls.push({ model, input });
     if (fail[model]) { const f = fail[model]; if (typeof f === 'function') return f(input, calls); throw new Error(f); }
     if (model === WHISPER) return { text: said };
-    if (model === VISION) return { response: looked };
-    return { response: reply };
+    if (VISION_MODELS.includes(model)) return { response: looked };
+    if (TEXT_MODELS.includes(model)) return { response: reply };
+    throw new Error('5007: No such model ' + model);
   } };
 }
+const everyVision = message => Object.fromEntries(VISION_MODELS.map(m => [m, message]));
 const request = (extra = {}) => readUnderstandRequest({ transcript: 'best beef noodles in taipei', images: [IMAGE], categories: CATEGORIES, ...extra });
 test.beforeEach(() => resetForTests());
 
@@ -95,7 +98,8 @@ test('look, then decide: what each sheet shows goes to the text model with the t
   const r = await understandClip(request({ images: [IMAGE, IMAGE] }), ai);
   assert.equal(r.status, 'understood');
   assert.deepEqual(ai.calls.map(c => c.model), [VISION, VISION, TEXT]);
-  assert.equal(ai.calls[0].input.image, IMAGE, 'a data URL first, as the documents show');
+  assert.equal(ai.calls[0].input.image, IMAGE.slice('data:image/jpeg;base64,'.length), 'first way: the prompt and the bare base64');
+  assert.match(ai.calls[0].input.prompt, /SHOWS:/);
   assert.equal(ai.calls[2].input.response_format.type, 'json_schema');
   const prompt = ai.calls[2].input.messages[0].content;
   assert.match(prompt, /best beef noodles in taipei/);
@@ -105,17 +109,51 @@ test('look, then decide: what each sheet shows goes to the text model with the t
   assert.equal(r.onScreen, 'BEST NOODLES 📍Taipei / BEST NOODLES 📍Taipei');
 });
 
-test('a picture format the model refuses is followed by the next one, and remembered', async () => {
-  const seenFormats = [];
-  const ai = fakeAI({ fail: { [VISION]: input => {
-    const kind = Array.isArray(input.image) ? 'bytes' : input.image.startsWith('data:') ? 'dataUrl' : 'base64';
-    seenFormats.push(kind);
-    if (kind === 'dataUrl') throw new Error("5006: Error: oneOf at '/' not met, 0 matches");
-    return { response: LOOKED };
-  } } });
+test('a vision model that refuses every way is followed by the next model and way, which are remembered', async () => {
+  const [first, second] = VISION_MODELS;
+  const ai = fakeAI({ fail: {
+    [first]: '3030: Unable to add image when there are no user-supplied nor system-supplied messages.',
+    [second]: input => {
+      if (!(Array.isArray(input.messages) && typeof input.messages[0].content === 'string' && input.image)) throw new Error('5006: oneOf not met');
+      return { response: LOOKED };
+    } } });
   const r = await understandClip(request({ images: [IMAGE, IMAGE] }), ai);
   assert.equal(r.status, 'understood');
-  assert.deepEqual(seenFormats, ['dataUrl', 'base64', 'base64'], 'the bare base64 is used from then on');
+  const looks = ai.calls.filter(c => VISION_MODELS.includes(c.model));
+  assert.equal(looks.filter(c => c.model === first).length, 4, 'every way was tried on the first model');
+  assert.deepEqual(looks.slice(-2).map(c => [c.model, !!c.input.image && Array.isArray(c.input.messages)]), [[second, true], [second, true]],
+    'the second sheet went straight to the way that worked');
+});
+
+test('a retired model is skipped after one try, for looking and for deciding', async () => {
+  const ai = fakeAI({ fail: { [VISION_MODELS[0]]: '5028: @cf/meta/x was deprecated on 2026-05-30.',
+    [TEXT_MODELS[0]]: '5028: @cf/meta/infire-llama-3.1-8b-instruct was deprecated on 2026-05-30. See the model catalog' } });
+  const r = await understandClip(request({ images: [IMAGE] }), ai);
+  assert.equal(r.status, 'understood');
+  assert.equal(ai.calls.filter(c => c.model === VISION_MODELS[0]).length, 1);
+  assert.equal(ai.calls.filter(c => c.model === TEXT_MODELS[0]).length, 1, 'no second try without JSON mode on a retired model');
+  assert.ok(ai.calls.some(c => c.model === TEXT_MODELS[1]));
+  await understandClip(request({ images: [IMAGE] }), ai);
+  assert.equal(ai.calls.filter(c => c.model === TEXT_MODELS[0]).length, 1, 'the working text model is remembered');
+});
+
+test('a way that drops the picture without an error is not taken as working', async () => {
+  const first = VISION_MODELS[0];
+  const ai = fakeAI({ fail: { [first]: input => ({ response: typeof input.prompt === 'string' && typeof input.image === 'string' && !input.image.startsWith('data:')
+    ? 'SHOWS: There are no screenshots provided.\nTEXT: NONE' : LOOKED }) } });
+  const r = await understandClip(request(), ai);
+  assert.equal(r.status, 'understood');
+  assert.equal(r.shows, 'A bowl of beef noodle soup at a busy stall.');
+});
+
+test('when no vision model works, it says why, and does not try them all again for every clip', async () => {
+  const ai = fakeAI({ fail: everyVision('3030: Unable to add image') });
+  const blind = await understandClip(request({ transcript: '' }), ai);
+  assert.equal(blind.status, 'failed');
+  assert.match(blind.detail, /^look: llama-4-scout-17b-16e-instruct: 3030: Unable to add image \| llama-3\.2-11b-vision-instruct: 3030/);
+  const before = ai.calls.length;
+  await understandClip(request({ transcript: '' }), ai);
+  assert.equal(ai.calls.length, before, 'the next clip is answered from what was learned');
 });
 
 test('the vision model\'s license is accepted once, then the clip is read', async () => {
@@ -154,13 +192,13 @@ test('no transcript still uses the picture; no picture skips looking; neither is
 test('failures say which step failed and what the service said', async () => {
   const limit = await understandClip(request(), fakeAI({ fail: { [VISION]: '4006: daily free allocation' } }));
   assert.deepEqual([limit.status, limit.reason], ['failed', 'AI_DAILY_LIMIT']);
-  const blind = await understandClip(request({ transcript: '' }), fakeAI({ fail: { [VISION]: 'upstream error 3040' } }));
-  assert.deepEqual([blind.status, blind.reason, blind.detail], ['failed', 'AI_FAILED', 'look: upstream error 3040']);
-  const halfBlind = await understandClip(request(), fakeAI({ fail: { [VISION]: 'upstream error 3040' } }));
+  resetForTests();
+  const halfBlind = await understandClip(request(), fakeAI({ fail: everyVision('upstream error 3040') }));
   assert.equal(halfBlind.status, 'understood', 'the transcript is enough when looking fails');
-  assert.equal(halfBlind.detail, 'look: upstream error 3040');
+  assert.match(halfBlind.detail, /^look: llama-4-scout-17b-16e-instruct: upstream error 3040/);
   const garbled = await understandClip(request(), fakeAI({ reply: 'I cannot help with that.' }));
-  assert.deepEqual([garbled.status, garbled.detail], ['failed', 'decide: the reply had no details in it']);
+  assert.equal(garbled.status, 'failed');
+  assert.match(garbled.detail, /^decide: llama-3\.3-70b-instruct-fp8-fast: the reply had no details in it/);
   const down = await transcribeAudio(AUDIO, fakeAI({ fail: { [WHISPER]: '5006: audio not valid' } }));
   assert.equal(down.detail, 'listen: 5006: audio not valid');
 });
@@ -169,10 +207,14 @@ test('the setup check tries every step and reports each one', async () => {
   const ok = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI());
   assert.equal(ok.ok, true);
   assert.deepEqual(ok.steps.map(s => [s.step, s.ok]), [['listen', true], ['look', true], ['decide', true]]);
-  assert.match(ok.steps[1].said, /picture sent as dataUrl/);
-  const bad = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI({ fail: { [WHISPER]: '5006: bad audio', [TEXT]: 'model is busy' } }));
+  assert.match(ok.steps[1].said, /using llama-4-scout-17b-16e-instruct, prompt \+ base64/);
+  assert.match(ok.steps[2].said, /^using llama-3\.3-70b-instruct-fp8-fast: Food/);
+  resetForTests();
+  const bad = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI({ fail: { [WHISPER]: '5006: bad audio', ...Object.fromEntries(TEXT_MODELS.map(m => [m, 'model is busy'])) } }));
   assert.equal(bad.ok, false);
-  assert.deepEqual(bad.steps.map(s => [s.step, s.ok, s.detail || '']), [['listen', false, 'listen: 5006: bad audio'], ['look', true, ''], ['decide', false, 'decide: model is busy']]);
+  assert.deepEqual(bad.steps.map(s => [s.step, s.ok]), [['listen', false], ['look', true], ['decide', false]]);
+  assert.equal(bad.steps[0].detail, 'listen: 5006: bad audio');
+  assert.match(bad.steps[2].detail, /^decide: llama-3\.3-70b-instruct-fp8-fast: model is busy \| llama-3\.1-8b-instruct-fp8: model is busy/);
 });
 
 // ---- the route, through the real Worker

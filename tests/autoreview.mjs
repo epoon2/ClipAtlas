@@ -27,8 +27,9 @@ const AI = { broken: false, async run(model, input) {
     asked.push({ model, rate: wav.readUInt32LE(24), seconds: (wav.length - 44) / 2 / wav.readUInt32LE(24), loudness: loud(wav) });
     return { text: loud(wav) > 0.01 ? 'the best beef noodles in taipei' : '' };
   }
-  if (model.includes('vision')) {   // look: plain words about one sheet of screenshots
-    asked.push({ model, image: input.image, prompt: input.messages?.[0]?.content || '' });
+  if (/scout|vision|mistral-small/.test(model)) {   // look: plain words about one sheet of screenshots
+    const image = typeof input.image === 'string' && !input.image.startsWith('data:') ? 'data:image/jpeg;base64,' + input.image : input.image;
+    asked.push({ model, image, prompt: input.prompt || input.messages?.[0]?.content || '' });
     return { response: 'SHOWS: A bowl of noodles.\nTEXT: BEST BEEF NOODLES TAIPEI' };
   }
   const prompt = input.messages?.[0]?.content || '';   // decide: JSON
