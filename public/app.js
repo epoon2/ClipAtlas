@@ -131,6 +131,7 @@
     const sort=$('#sortFilter').value;
     records.sort((a,b) => sort==='title'?(a.title||a.place||'').localeCompare(b.title||b.place||''):
       sort==='oldest'?(a.savedAt||a.createdAt).localeCompare(b.savedAt||b.createdAt):(b.savedAt||b.createdAt).localeCompare(a.savedAt||a.createdAt));
+    shownIds=records.map(r=>r.id);
     $('#filteredCount').textContent=records.length+' '+(records.length===1?'clip':'clips');
     $('#libraryEmpty').hidden=records.length!==0;
     $('#clipGrid').innerHTML=records.map(r=>{
@@ -138,7 +139,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -160,7 +161,7 @@
   }
   function render() {
     fillCategorySelect($('#categoryFilter'), true); fillCategorySelect($('#formCategory'), false); applyTabs();
-    renderStats(); renderCollections(); renderAnalysisSummary();
+    renderStats(); renderCollections(); renderAnalysisSummary(); renderReviewCount();
     if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); else if(currentTab==='settings')renderSettings();
   }
   function openEditor(id=null) {
@@ -330,9 +331,159 @@
       analysisRunning=false;$('#analyzeLinks').disabled=false;$('#cancelAnalyze').hidden=true;
       const why=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${REASON_WORDS[k]||k} ${n}`).join(', ');
       const left=state.records.filter(r=>C.needsAnalysis(r)).length;
-      $('#analyzeProgress').textContent=`${stopReason}Done: ${tallyText(tally)}.${why?' Why: '+why+'.':''}${left?` ${left} still waiting; click Analyze again for the next batch.`:''} Check suggested categories before marking Reviewed.`;
+      $('#analyzeProgress').textContent=`${stopReason}Done: ${tallyText(tally)}.${why?' Why: '+why+'.':''}${left?` ${left} still waiting; click Look up again for the next batch.`:''} Use Review clips to check what it filled in.`;
       render();
     }
+  }
+  /* ---- Review mode: TikTok's own player beside a short form, one clip at a time ---- */
+  const RV_FIELDS=['title','place','city','country','notes','caption'];
+  let rv={queue:[],index:0,scope:'review',shown:[],saved:0,skipped:0,touched:false,dirty:false,suggestion:null,fromUnsorted:false,src:''};
+  let shownIds=[];
+  const mac=/Mac|iPhone|iPad/.test(navigator.platform||'');
+  function reviewScopes(){
+    const out=Object.entries(C.REVIEW_SCOPES).map(([k,label])=>[k,label,C.reviewQueue(state.records,k).length]);
+    if(rv.shown.length)out.push(['shown','Clips on screen',rv.shown.length]);
+    for(const name of listCollections())out.push(['collection:'+name,'Collection: '+name,C.reviewQueue(state.records,'collection:'+name).length]);
+    return out;
+  }
+  function renderReviewCount(){
+    const n=C.reviewQueue(state.records,'review').length,el=$('#reviewCount');if(!el)return;
+    el.textContent=state.records.length?(n?`${n} clip${n===1?'':'s'} need${n===1?'s':''} review.`:'Every clip is reviewed.'):'Import some clips first.';
+    $('#startReview').disabled=!state.records.length;
+  }
+  function openReview(scope='review',startId=null){
+    if(!state.records.length){toast('Import or add some clips first.');return;}
+    rv.scope=scope;rv.saved=0;rv.skipped=0;
+    rv.queue=scope==='shown'?rv.shown.slice():C.reviewQueue(state.records,scope);
+    rv.index=Math.max(0,startId?rv.queue.indexOf(startId):0);
+    const pick=$('#reviewScope');
+    pick.innerHTML=reviewScopes().map(([k,label,n])=>`<option value="${html(k)}">${html(label)} (${n})</option>`).join('');
+    pick.value=scope;
+    $('#reviewKeys').textContent=`Enter: save & next · ${mac?'⌘':'Ctrl'}+→ skip · ${mac?'⌘':'Ctrl'}+← back · Esc: close`;
+    const dlg=$('#reviewDialog');if(!dlg.open)dlg.showModal();
+    showClip();
+  }
+  function setPlayer(r){
+    const box=$('#reviewFrame'),src=C.playerUrl(r);
+    if(src&&src===rv.src&&box.querySelector('iframe'))return;
+    rv.src=src;box.replaceChildren();
+    if(src){
+      const f=document.createElement('iframe');
+      f.src=src;f.title='TikTok video player';f.allow='autoplay; encrypted-media; fullscreen; picture-in-picture';
+      f.referrerPolicy='strict-origin-when-cross-origin';f.allowFullscreen=true;box.append(f);
+    }else{
+      const p=document.createElement('p');p.className='player-none';
+      p.textContent='This is a short share link without a video number, so it cannot play here. Open it on TikTok to watch it.';
+      box.append(p);
+    }
+    $('#reviewOpen').href=r.url;
+  }
+  function stopPlayer(){$('#reviewFrame').replaceChildren();rv.src='';}
+  function reviewText(){
+    const f=$('#reviewForm').elements;
+    return [f.title.value,f.caption.value,f.notes.value,f.tags.value].join(' ');
+  }
+  function updateSuggestion(){
+    const box=$('#reviewSuggest'),sel=$('#reviewCategory');
+    const hasWords=categoryList().some(c=>(c.words||[]).length);
+    rv.suggestion=hasWords?C.suggestCategory(reviewText(),categoryList()):null;
+    if(rv.fromUnsorted&&!rv.touched)sel.value=rv.suggestion?rv.suggestion.name:'Unsorted';
+    box.replaceChildren();
+    if(!hasWords){box.textContent='Add sort words in Settings and categories will be suggested as you type.';return;}
+    if(!rv.suggestion){box.textContent='No sort words match yet.';return;}
+    const words=rv.suggestion.words.slice(0,4).map(w=>'“'+w+'”').join(', '),name=`${emojiFor(rv.suggestion.name)} ${rv.suggestion.name}`;
+    if(sel.value===rv.suggestion.name){box.textContent=rv.fromUnsorted&&!rv.touched?`Picked ${name} because of ${words}. Change it if that's wrong.`:`${name} matches ${words}.`;return;}
+    box.append(`Suggested: ${name}, because of ${words}. `);
+    const use=document.createElement('button');use.type='button';use.className='link-inline';use.id='reviewUse';use.textContent='Use it';
+    box.append(use);
+  }
+  function showClip(){
+    // Clips deleted since the queue was made are left out.
+    while(rv.index<rv.queue.length&&!state.records.some(r=>r.id===rv.queue[rv.index]))rv.queue.splice(rv.index,1);
+    const total=rv.queue.length,done=rv.index>=total;
+    $('#reviewBody').hidden=done;$('#reviewDone').hidden=!done;
+    for(const id of ['reviewPrev','reviewSkip','reviewSave'])$('#'+id).hidden=done;
+    $('#reviewKeys').hidden=done;
+    $('#reviewPos').textContent=String(Math.min(rv.index+1,total));$('#reviewTotal').textContent=String(total);
+    $('#reviewBar').style.width=(total?Math.round(Math.min(rv.index,total)/total*100):100)+'%';
+    if(done){
+      stopPlayer();
+      const label=$('#reviewScope').selectedOptions[0]?.textContent.replace(/\s*\(\d+\)$/,'')||'this list';
+      $('#reviewDoneTitle').textContent=total?'All done':'Nothing to review here';
+      $('#reviewDoneLine').textContent=total?`That's every clip in ${label}: ${rv.saved} saved, ${rv.skipped} skipped.`:`${label} has no clips right now. Pick another list above.`;
+      $('#reviewFinish').focus();return;
+    }
+    const r=state.records.find(x=>x.id===rv.queue[rv.index]);
+    const form=$('#reviewForm'),f=form.elements;
+    for(const k of RV_FIELDS)f[k].value=r[k]||'';
+    f.tags.value=(r.tags||[]).join(', ');f.collections.value=(r.collections||[]).join(', ');
+    fillCategorySelect($('#reviewCategory'),false);$('#reviewCategory').value=r.category||'Unsorted';
+    if($('#reviewCategory').value!==(r.category||'Unsorted'))$('#reviewCategory').value='Unsorted';
+    f.reviewed.checked=true;
+    rv.fromUnsorted=!r.category||r.category==='Unsorted';rv.touched=false;rv.dirty=false;
+    updateSuggestion();
+    $('#reviewPrev').disabled=rv.index===0;
+    setPlayer(r);
+    if(matchMedia('(pointer:fine)').matches)f.title.focus();
+  }
+  function leaveClip(){
+    return !rv.dirty||confirm('Leave this clip without saving your changes?');
+  }
+  function reviewMove(step){
+    if(!leaveClip())return;
+    if(step>0&&rv.index<rv.queue.length)rv.skipped++;
+    rv.index=Math.max(0,Math.min(rv.queue.length,rv.index+step));showClip();
+  }
+  function reviewSave(evt){
+    evt?.preventDefault();
+    if(rv.index>=rv.queue.length)return;
+    const r=state.records.find(x=>x.id===rv.queue[rv.index]);if(!r){showClip();return;}
+    const f=$('#reviewForm').elements,fields={category:$('#reviewCategory').value,tags:f.tags.value,collections:f.collections.value};
+    for(const k of RV_FIELDS)fields[k]=f[k].value;
+    const next=C.reviewEdit(r,fields,{reviewed:f.reviewed.checked,suggested:rv.suggestion});
+    if(!next){toast('This clip could not be saved.');return;}
+    const same=JSON.stringify({...next,updatedAt:0})===JSON.stringify({...r,updatedAt:0});
+    if(!same){state.records[state.records.indexOf(r)]=next;commit();}
+    rv.saved++;rv.dirty=false;rv.index++;showClip();
+  }
+  function closeReview(){
+    if(!leaveClip())return false;
+    stopPlayer();$('#reviewDialog').close();
+    if(rv.saved)toast(`Saved ${rv.saved} clip${rv.saved===1?'':'s'}.`);
+    return true;
+  }
+  function initReview(){
+    const dlg=$('#reviewDialog'),form=$('#reviewForm');
+    $('#startReview').addEventListener('click',()=>{rv.shown=[];openReview('review');});
+    form.addEventListener('submit',reviewSave);
+    form.addEventListener('input',evt=>{
+      if(evt.target.id==='reviewScope')return;
+      rv.dirty=true;
+      if(evt.target.id==='reviewCategory')rv.touched=true;
+      if(['title','caption','notes','tags'].includes(evt.target.name))updateSuggestion();
+    });
+    form.addEventListener('change',evt=>{if(evt.target.id==='reviewCategory'){rv.touched=true;rv.dirty=true;updateSuggestion();}});
+    $('#reviewSuggest').addEventListener('click',evt=>{
+      if(evt.target.id!=='reviewUse'||!rv.suggestion)return;
+      $('#reviewCategory').value=rv.suggestion.name;rv.touched=true;rv.dirty=true;updateSuggestion();
+    });
+    $('#reviewScope').addEventListener('change',evt=>{
+      if(!leaveClip()){evt.target.value=rv.scope;return;}
+      rv.dirty=false;openReview(evt.target.value);
+    });
+    $('#reviewPrev').addEventListener('click',()=>reviewMove(-1));
+    $('#reviewSkip').addEventListener('click',()=>reviewMove(1));
+    $('#reviewClose').addEventListener('click',closeReview);
+    $('#reviewFinish').addEventListener('click',closeReview);
+    $('#reviewAgain').addEventListener('click',()=>openReview(rv.scope));
+    dlg.addEventListener('cancel',evt=>{evt.preventDefault();closeReview();});
+    dlg.addEventListener('close',stopPlayer);
+    dlg.addEventListener('keydown',evt=>{
+      const mod=evt.ctrlKey||evt.metaKey;
+      if(mod&&evt.key==='ArrowRight'){evt.preventDefault();reviewMove(1);}
+      else if(mod&&evt.key==='ArrowLeft'){evt.preventDefault();reviewMove(-1);}
+      else if(mod&&evt.key==='Enter'){evt.preventDefault();reviewSave();}
+    });
   }
   /* ---- Settings: categories with sort words, optional tabs, starter sets ---- */
   function renderSettings(){
@@ -420,7 +571,8 @@
       const coll=evt.target.closest('[data-collection]');if(coll){activeCollection=coll.dataset.collection;selectTab('library');return;}
       const action=evt.target.closest('[data-action]');if(!action)return;
       const {action:kind,id}=action.dataset;
-      if(kind==='edit')openEditor(id);
+      if(kind==='watch'){rv.shown=shownIds.slice();openReview('shown',id);}
+      else if(kind==='edit')openEditor(id);
       else if(kind==='plan')addToPlan(id);
       else if(kind==='delete'){
         const r=state.records.find(x=>x.id===id);
@@ -430,6 +582,7 @@
       else if(kind==='up')movePlan(id,-1);else if(kind==='down')movePlan(id,1);
     });
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
+    initReview();
     $('#analyzeLinks').addEventListener('click',analyzeLinks);
     $('#viewEnriched').addEventListener('click',viewEnriched);
     $('#settingsPage').addEventListener('change',settingsChange);

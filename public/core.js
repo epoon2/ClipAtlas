@@ -402,6 +402,39 @@
     return list.length === (state.categories || []).length ? state : { ...state, categories: normalizeCategories(list) };
   }
 
+  /* ---- Review mode ------------------------------------------------------------
+     TikTok's official embedded player plays a video by its ID in the viewer's
+     own browser: no lookup, no rate limit. */
+  function playerUrl(r) {
+    const id = r && safeString(r.videoId);
+    return /^\d{8,25}$/.test(id) ? `https://www.tiktok.com/player/v1/${id}?description=1&music_info=1&autoplay=1&rel=0` : '';
+  }
+  const REVIEW_SCOPES = { review: 'Needs review', unsorted: 'Unsorted', all: 'All clips' };
+  /** Clip ids to go through, newest saved first (the library's default order).
+      scope: 'review' | 'unsorted' | 'all' | 'collection:<name>'. */
+  function reviewQueue(records, scope) {
+    const pick = scope === 'review' ? r => r.status !== 'reviewed'
+      : scope === 'unsorted' ? r => !r.category || r.category === 'Unsorted'
+        : String(scope || '').startsWith('collection:') ? r => (r.collections || []).includes(String(scope).slice(11))
+          : () => true;
+    return (records || []).filter(pick)
+      .sort((a, b) => String(b.savedAt || b.createdAt || '').localeCompare(String(a.savedAt || a.createdAt || '')))
+      .map(r => r.id);
+  }
+  /** One clip after a Review-mode save. ``fields`` holds what the form shows
+      (title, category, place, city, country, tags, collections, notes, caption);
+      ``reviewed`` is the checkbox; ``suggested`` the live suggestion, if the
+      category came from it. The link, creator, dates and lookup results stay. */
+  function reviewEdit(record, fields, { reviewed = true, suggested = null, now = isoNow() } = {}) {
+    const next = createRecord({ ...record, ...fields, status: reviewed ? 'reviewed' : 'unreviewed' });
+    if (!next) return null;
+    next.id = record.id; next.originalUrl = record.originalUrl || next.originalUrl;
+    if (next.category === record.category) next.autoSorted = cleanAutoSorted(record.autoSorted);
+    else if (suggested && suggested.name === next.category) next.autoSorted = { name: suggested.name, words: (suggested.words || []).slice(0, 6), at: now };
+    else next.autoSorted = undefined;
+    return next;
+  }
+
   function planMarkdown(items, records, title) {
     const byId = new Map(records.map(v => [v.id, v]));
     const groups = new Map();
@@ -426,5 +459,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });
