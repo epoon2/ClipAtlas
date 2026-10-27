@@ -43,6 +43,23 @@ For development, run `npm run db:local` followed by `npm run dev` and test at th
 
 GitHub Pages is suitable for a personal browser-only app, but accounts cannot safely be created with only static HTML. This version uses Cloudflare Workers for API endpoints and Cloudflare D1 for server-side account records, so users can sign up and open their own private library from different devices.
 
+## Your own categories and tabs
+
+Each account has its own categories (Settings). A category has a name, an emoji and **sort words**:
+
+- A clip whose title, caption, notes or tags contain a category's sort words is sorted there. This happens on import, after a TikTok lookup, and with **Sort Unsorted clips now**. Only Unsorted clips are moved; a category you picked yourself is never changed.
+- Separate words with commas. `a+b` needs both words, like `taipei+food`. Words of 4 or more letters, phrases and Chinese match anywhere (so `food` is found in `#taiwanfood`); shorter words match as whole words (`eat` is not found in `seats`).
+- The category with the most matching words wins (`a+b` counts as two); a tie goes to the one higher in the list. Each sorted clip shows **Sorted by:** and the words that matched.
+- Rename (clips follow), reorder, merge into another category, or delete (clips go to Unsorted). A CSV can bring its own category names; they are added to the list.
+
+**New accounts** pick a starter set: Travel planning, Research, Recipes & cooking, Shopping & finds, or Start empty. It fills in starter categories and tabs, all editable. More starter categories can be added later from Settings; only missing ones are added.
+
+**Accounts from before** this version keep the first version's list (Taiwan · Food, Taiwan · Shopping, Taiwan · Activities, Dates & restaurants, Travel ideas, Points & miles, Other) with sort words, plus any category name their clips use, and keep the Itinerary.
+
+**Tabs:** the Itinerary can be turned off in Settings (planned stops are kept). A research board and a checklist are planned as more tab types.
+
+Stored in the library as `categories: [{id, name, emoji, words}]` and `settings: {purpose, tabs: {itinerary}}`; clips refer to a category by name.
+
 ## Automatic metadata enrichment
 
 After signing in and importing TikTok links, choose **Analyze unreviewed links** on the Discoveries page. It looks up the next **40** links that need it, one at a time, and saves after each one; click again for the next batch. **View filled-in clips** jumps to the ones that got details, and the **analysis** filter shows any group.

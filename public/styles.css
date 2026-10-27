@@ -13,3 +13,30 @@
 .analysis-badge{font-size:10px;letter-spacing:.02em;border-radius:14px;padding:5px 9px;background:#f1f3f2;color:#5b6b66}
 .analysis-badge.enriched{background:#e3f1fb;color:#2d6690}
 .analysis-badge.failed,.analysis-badge.rejected{background:#fdecea;color:#a3443a}
+.sorted-why{font-size:11px;color:#7b918a;margin:4px 0 0}
+.settings-panel{margin-bottom:17px}
+.cat-head,.cat-row{display:grid;grid-template-columns:52px minmax(120px,1fr) minmax(180px,2fr) 64px 262px;gap:8px;align-items:center}
+.cat-head{font-size:10px;font-weight:850;letter-spacing:.1em;color:#6e847c;margin:16px 0 6px}
+.cat-rows{display:grid;gap:8px}
+.cat-row input{border:1px solid #dae4dd;padding:9px 10px;border-radius:8px;background:#fff;color:#183d3c;min-width:0;width:100%}
+.cat-row .cat-emoji{text-align:center}
+.cat-count{font-size:11px;color:#7b918a}
+.cat-actions{display:flex;gap:5px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.cat-actions button,.cat-actions select{border:1px solid #dce9de;border-radius:6px;background:#fff;padding:6px 8px;color:#4a7468;font-size:11px}
+.cat-actions .danger{color:#9c4a43}
+.cat-new{margin-top:12px;padding-top:12px;border-top:1px dashed #dae4dd}
+.settings-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px}
+.settings-actions select{border:1px solid #dae4dd;border-radius:8px;padding:9px 10px;background:#fff}
+.toggle{display:flex;gap:10px;align-items:flex-start;margin:14px 0 4px;color:#294b49;line-height:1.5}
+.toggle input{margin-top:4px}
+.starter-dialog{max-width:640px}
+.starter-body{padding:28px}
+.starter-body h2{margin:6px 0 4px;font-size:26px;letter-spacing:-.04em}
+.starter-choices{display:grid;gap:10px;margin-top:18px}
+.starter-choice{text-align:left;border:1px solid #dae4dd;background:#fff;border-radius:12px;padding:14px 16px;display:grid;gap:4px;color:#183d3c}
+.starter-choice:hover,.starter-choice:focus-visible{border-color:#6bb8a4;background:#f2f9f4}
+.starter-choice span{color:#5f776f;font-size:13px}
+.starter-choice small{color:#7b918a;font-size:11px}
+.cat-actions select{width:112px}
+@media(max-width:850px){.cat-head{display:none}.cat-row{grid-template-columns:52px 1fr;}.cat-row .cat-words{grid-column:1/-1}.cat-row .cat-count{grid-column:1/-1}.cat-row .cat-actions{grid-column:1/-1}}
+

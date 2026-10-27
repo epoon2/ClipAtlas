@@ -74,14 +74,34 @@
     const a = document.createElement('a'); a.href=url; a.download=filename; a.style.display='none';
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url),1500);
   };
+  // The account's own categories (Settings), and its optional tabs.
+  const categoryList = () => Array.isArray(state.categories) ? state.categories : [];
+  const emojiFor = name => name === 'Unsorted' ? '✦' : (categoryList().find(c => c.name === name)?.emoji || '🔖');
+  const tabOn = tab => state.settings?.tabs?.[tab] !== false;
+  function fillCategorySelect(select, withAll) {
+    const keep = select.value;
+    const names = ['Unsorted', ...categoryList().map(c => c.name)];
+    select.innerHTML = (withAll ? '<option value="all">All categories</option>' : '') +
+      names.map(n => `<option value="${html(n)}">${html(n === 'Unsorted' ? 'Unsorted' : emojiFor(n) + ' ' + n)}</option>`).join('');
+    select.value = [...select.options].some(o => o.value === keep) ? keep : (withAll ? 'all' : 'Unsorted');
+  }
+  function applyTabs() {
+    const on = tabOn('itinerary');
+    for (const el of $$('[data-tab="itinerary"]')) el.hidden = !on;
+    $('#statPlanCard').hidden = !on;
+    if (!on && currentTab === 'itinerary') selectTab('library');
+    const starter = C.STARTERS[state.settings?.purpose];
+    $('#heroTitle').textContent = starter ? starter.hero : 'All the videos you saved.';
+    $('#heroLine').textContent = on ? 'Collect the clips. Capture the details. Plan the actual trip.' : 'Collect the clips. Capture the details. Find them again.';
+  }
   const listCollections = () => [...new Set([...state.collections, ...state.records.flatMap(r => r.collections || [])])].sort((a,b)=>a.localeCompare(b));
   function selectTab(tab) {
-    if (!['library','itinerary','import'].includes(tab)) return;
+    if (!['library','itinerary','import','settings'].includes(tab) || (tab==='itinerary' && !tabOn('itinerary'))) return;
     currentTab=tab;
     $$('.page').forEach(x=>x.classList.toggle('active',x.id===tab+'Page'));
     $$('.nav-link').forEach(x=>x.classList.toggle('active',x.dataset.tab===tab));
-    $('#crumb').textContent=({library:'DISCOVERIES',itinerary:'ITINERARY',import:'IMPORT & BACKUP'})[tab];
-    if (tab==='library') renderLibrary(); else if(tab==='itinerary') renderItinerary();
+    $('#crumb').textContent=({library:'DISCOVERIES',itinerary:'ITINERARY',import:'IMPORT & BACKUP',settings:'SETTINGS'})[tab];
+    if (tab==='library') renderLibrary(); else if(tab==='itinerary') renderItinerary(); else if(tab==='settings') renderSettings();
     window.scrollTo(0,0);
   }
   function renderCollections() {
@@ -93,7 +113,6 @@
     }
     $('#collectionNav').innerHTML=out;
   }
-  const symbols = {Unsorted:'✦','Taiwan · Food':'🍜','Taiwan · Shopping':'🛍️','Taiwan · Activities':'🏮','Dates & restaurants':'🌷','Travel ideas':'🧳','Points & miles':'✈️',Other:'🔖'};
   function renderStats() {
     $('#statClips').textContent=state.records.length;
     $('#statCollections').textContent=listCollections().length;
@@ -119,7 +138,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${symbols[r.category]||'✦'}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div><h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button><button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button><button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -139,7 +158,11 @@
     }
     days.innerHTML=s;
   }
-  function render() { renderStats(); renderCollections(); renderAnalysisSummary(); if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); }
+  function render() {
+    fillCategorySelect($('#categoryFilter'), true); fillCategorySelect($('#formCategory'), false); applyTabs();
+    renderStats(); renderCollections(); renderAnalysisSummary();
+    if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); else if(currentTab==='settings')renderSettings();
+  }
   function openEditor(id=null) {
     editingId=id; const r=state.records.find(x=>x.id===id);
     $('#modalTitle').textContent=r?'Edit discovery':'New discovery'; $('#modalError').textContent='';
@@ -162,6 +185,7 @@
     const created=C.createRecord({...source,id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt});
     if(!created){$('#modalError').textContent='Invalid TikTok URL.';return;}
     if(old&&old.key===created.key){created.enrichment=old.enrichment;created.enrichedAt=old.enrichedAt;created.enrichmentStatus=old.enrichmentStatus;}
+    if(old&&old.category===created.category)created.autoSorted=old.autoSorted;
     if(old)state.records[state.records.indexOf(old)]={...created,id:old.id};else state.records.push(created);
     $('#editDialog').close();commit();toast(old?'Discovery updated':'New discovery saved');
   }
@@ -188,6 +212,7 @@
   function merge(imported, context='') {
     const m=C.mergeRecords(state.records, imported);
     state.records=m.records;
+    if(Array.isArray(state.categories)){state=C.addMissingCategories(state);m.sorted=C.sortUnsorted(state.records,state.categories);}
     if(context)for (const r of state.records) {
       // Only assign a collection to links that were in THIS import.
       const keys=new Set(imported.map(x=>C.parseTikTokURL(x.url||x.link)?.key).filter(Boolean));
@@ -214,33 +239,27 @@
           clean.collections=Array.isArray(data.state.collections)?data.state.collections.filter(x=>typeof x==='string'):[];
           clean.tripTitle=String(data.state.tripTitle||clean.tripTitle);
           clean.dayCount=Math.max(3,Math.min(14,Number(data.state.dayCount)||7));
-          state=clean;commit();toast('Full backup restored.');$('#importFeedback').textContent='Backup restored successfully.';return;
+          if(Array.isArray(data.state.categories))clean.categories=C.normalizeCategories(data.state.categories);
+          if(data.state.settings)clean.settings=data.state.settings;
+          state=C.ensureSetup(clean).state;if(!Array.isArray(state.categories))state=C.applyStarter(state,'empty');
+          state=C.addMissingCategories(state);commit();toast('Full backup restored.');$('#importFeedback').textContent='Backup restored successfully.';return;
         }
         entries=C.extractTikTokFavorites(data);
       } else throw new Error('Use a .json or .csv file. Unzip TikTok’s download first.');
       if(!entries.length){$('#importFeedback').textContent='No favorite TikTok links found. Try the official JSON export with Favorite Videos included, or use the CSV template.';return;}
       const result=merge(entries,$('#bulkCollection').value.trim());
-      $('#importFeedback').textContent=`Imported ${result.added} new links; ${result.duplicates} duplicates; ${result.updated} enriched; ${result.invalid} invalid. Your existing notes and itinerary were kept.`;
+      $('#importFeedback').textContent=`Imported ${result.added} new links; ${result.duplicates} duplicates; ${result.updated} enriched; ${result.invalid} invalid.${result.sorted?` ${result.sorted} sorted into your categories by their text.`:''} Your existing notes and itinerary were kept.`;
       toast('Import finished: '+result.added+' new discoveries');
     }catch(err){$('#importFeedback').textContent='Import error: '+err.message;toast('Could not import this file.');}
     finally{$('#fileImport').value='';}
   }
   // Conservative suggestions from caption text only. Never invent a place or price.
-  const RULES = [
-    ['Taiwan · Food',/taiwan.*(food|eat|restaurant|night market)|taipei.*(food|eat|restaurant|cafe)|夜市|小吃|美食|餐廳|餐厅|吃什麼|吃什么|珍珠奶茶|bubble tea/i],
-    ['Taiwan · Shopping',/taiwan.*(shopping|shop|buy|store)|taipei.*(shopping|shop|store)|逛街|購物|购物|伴手禮|伴手礼/i],
-    ['Taiwan · Activities',/taiwan.*(things to do|attractions|itinerary|explore)|taipei.*(things to do|attractions)|九份|十分|景點|景点/i],
-    ['Dates & restaurants',/date night|date idea|romantic|couples|約會|约会/i],
-    ['Points & miles',/points transfer|transfer partner|credit card points|miles redemption|amex points|chase points|capital one miles/i],
-    ['Travel ideas',/travel|vacation|hotel|flight|itinerary|trip|旅遊|旅游/i]
-  ];
   function suggestMetadata(title){
     const text=String(title||'');const lower=text.toLowerCase();
-    const category=RULES.find(r=>r[1].test(text))?.[0]||'';
     const city = /taipei|台北|臺北/i.test(text)?'Taipei':/taichung|台中|臺中/i.test(text)?'Taichung':/tainan|台南/i.test(text)?'Tainan':/kaohsiung|高雄/i.test(text)?'Kaohsiung':'';
     const country=/taiwan|台灣|台湾|臺灣|taipei|taichung|tainan|kaohsiung|台北|臺北|台中|臺中|台南|高雄/i.test(text)?'Taiwan':'';
     const tags=[...new Set((text.match(/#[\p{L}\p{N}_]+/gu)||[]).map(h=>h.slice(1)))].slice(0,12);
-    return {category,city,country,tags};
+    return {city,country,tags};
   }
   // Looks up the next batch of links that need it (C.needsAnalysis), one at a
   // time, saving after each. Each clip keeps what happened in r.enrichment
@@ -268,10 +287,10 @@
     if(!r.title&&title)r.title=title;
     if(!r.caption&&title)r.caption=title;
     if(!r.creator&&data.creator)r.creator=String(data.creator);
-    if((!r.category||['Unsorted','Other','Uncategorized'].includes(r.category))&&suggestion.category)r.category=suggestion.category;
+    r.tags=[...new Set([...(r.tags||[]),...suggestion.tags])].slice(0,20);
+    C.sortUnsorted([r],categoryList());
     if(!r.city&&suggestion.city)r.city=suggestion.city;
     if(!r.country&&suggestion.country)r.country=suggestion.country;
-    r.tags=[...new Set([...(r.tags||[]),...suggestion.tags])].slice(0,20);
     // TikTok told us the full address (with the creator): use it for the link.
     const full=data.canonicalUrl?C.parseTikTokURL(data.canonicalUrl):null;
     if(full){
@@ -315,13 +334,87 @@
       render();
     }
   }
+  /* ---- Settings: categories with sort words, optional tabs, starter sets ---- */
+  function renderSettings(){
+    const counts={};for(const r of state.records)counts[r.category]=(counts[r.category]||0)+1;
+    const list=categoryList();
+    $('#tabItinerary').checked=tabOn('itinerary');
+    const kept=state.plan.length;
+    $('#tabItineraryNote').textContent=!tabOn('itinerary')&&kept?`Your ${kept} planned stop${kept===1?' is':'s are'} kept and come back when you turn it on.`:'';
+    $('#categoryRows').innerHTML=list.length?list.map((c,i)=>`<div class="cat-row" data-cat="${html(c.id)}">
+      <input class="cat-emoji" data-field="emoji" value="${html(c.emoji)}" aria-label="Emoji for ${html(c.name)}" maxlength="8">
+      <input class="cat-name" data-field="name" value="${html(c.name)}" aria-label="Category name" maxlength="40">
+      <input class="cat-words" data-field="words" value="${html(c.words.join(', '))}" aria-label="Sort words for ${html(c.name)}" placeholder="sort words, separated by commas">
+      <span class="cat-count">${counts[c.name]||0} clip${counts[c.name]===1?'':'s'}</span>
+      <span class="cat-actions"><button type="button" data-cat-move="-1" ${i===0?'disabled':''} aria-label="Move up">↑</button><button type="button" data-cat-move="1" ${i===list.length-1?'disabled':''} aria-label="Move down">↓</button>
+      <select data-cat-merge aria-label="Merge ${html(c.name)} into another category"><option value="">Merge into…</option>${list.filter(o=>o.id!==c.id).map(o=>`<option value="${html(o.name)}">${html(o.name)}</option>`).join('')}</select>
+      <button type="button" class="danger" data-cat-delete aria-label="Delete ${html(c.name)}">Delete</button></span></div>`).join(''):'<p class="hint">No categories yet. Add one below, or add a starter set.</p>';
+    $('#unsortedCount').textContent=`${counts.Unsorted||0} clip${counts.Unsorted===1?' is':'s are'} Unsorted.`;
+    $('#starterPick').innerHTML=Object.entries(C.STARTERS).filter(([k])=>k!=='empty').map(([k,v])=>`<option value="${html(k)}">${html(v.label)}</option>`).join('');
+  }
+  function categoryById(id){return categoryList().find(c=>c.id===id);}
+  function settingsChange(evt){
+    const t=evt.target;
+    if(t.id==='tabItinerary'){state.settings={...(state.settings||{}),tabs:{...(state.settings?.tabs||{}),itinerary:t.checked}};commit();return;}
+    const row=t.closest('[data-cat]');if(!row)return;
+    const c=categoryById(row.dataset.cat);if(!c)return;
+    if(t.dataset.catMerge!==undefined&&t.value){
+      const target=t.value;
+      if(!confirm(`Move every "${c.name}" clip to "${target}" and remove "${c.name}"?`)){t.value='';return;}
+      state=C.deleteCategory(state,c.name,target);commit();toast(`Merged into ${target}.`);return;
+    }
+    if(t.dataset.field==='name'){
+      const res=C.renameCategory(state,c.name,t.value);
+      if(res.error){toast(res.error);t.value=c.name;return;}
+      state=res.state;commit();return;
+    }
+    if(t.dataset.field==='emoji'){state.categories=categoryList().map(x=>x.id===c.id?{...x,emoji:t.value.trim().slice(0,8)||'🔖'}:x);commit();return;}
+    if(t.dataset.field==='words'){state.categories=C.normalizeCategories(categoryList().map(x=>x.id===c.id?{...x,words:t.value}:x));commit();}
+  }
+  function settingsClick(evt){
+    const t=evt.target.closest('button');if(!t)return;
+    const row=t.closest('[data-cat]');
+    if(row&&t.dataset.catMove){
+      const list=[...categoryList()],i=list.findIndex(c=>c.id===row.dataset.cat),j=i+Number(t.dataset.catMove);
+      if(i<0||j<0||j>=list.length)return;[list[i],list[j]]=[list[j],list[i]];state.categories=list;commit();return;
+    }
+    if(row&&t.dataset.catDelete!==undefined){
+      const c=categoryById(row.dataset.cat);if(!c)return;
+      const n=state.records.filter(r=>r.category===c.name).length;
+      if(!confirm(`Delete "${c.name}"?${n?` Its ${n} clip${n===1?'':'s'} will move to Unsorted.`:''}`))return;
+      state=C.deleteCategory(state,c.name);commit();return;
+    }
+    if(t.id==='addCategory'){
+      const name=C.categoryName($('#newCatName').value);
+      if(!name){toast('Give the new category a name (not "Unsorted").');return;}
+      if(categoryList().some(c=>c.name.toLowerCase()===name.toLowerCase())){toast(`You already have "${name}".`);return;}
+      state.categories=C.normalizeCategories([...categoryList(),{name,emoji:$('#newCatEmoji').value,words:$('#newCatWords').value}]);
+      for(const id of ['newCatName','newCatEmoji','newCatWords'])$('#'+id).value='';
+      commit();toast(`Added "${name}".`);return;
+    }
+    if(t.id==='sortNow'){
+      const n=C.sortUnsorted(state.records,categoryList());commit();
+      toast(n?`Sorted ${n} clip${n===1?'':'s'} by their sort words.`:'No Unsorted clip matched any sort words.');return;
+    }
+    if(t.id==='addStarter'){
+      const key=$('#starterPick').value;const before=categoryList().length;
+      state=C.applyStarter(state,key,{keepTabs:true});commit();
+      toast(`Added ${categoryList().length-before} categor${categoryList().length-before===1?'y':'ies'} from ${C.STARTERS[key].label}.`);
+    }
+  }
+  function openStarterDialog(){
+    const dlg=$('#starterDialog');
+    $('#starterChoices').innerHTML=Object.entries(C.STARTERS).map(([k,v])=>`<button type="button" class="starter-choice" data-starter="${html(k)}"><strong>${html(v.label)}</strong><span>${html(v.blurb)}</span><small>${v.categories.length?html(v.categories.map(c=>c[1]+' '+c[0]).join(' · ')):'Make your own categories in Settings'}${v.tabs.itinerary?' · plus the Itinerary tab':''}</small></button>`).join('');
+    dlg.addEventListener('cancel',e=>e.preventDefault());
+    dlg.onclick=e=>{const b=e.target.closest('[data-starter]');if(!b)return;state=C.applyStarter(state,b.dataset.starter);dlg.close();commit();toast('All set. You can change categories and tabs any time in Settings.');};
+    dlg.showModal();
+  }
   function viewEnriched(){
     activeCollection='';$('#search').value='';$('#categoryFilter').value='all';$('#statusFilter').value='all';
     $('#analysisFilter').value='enriched';selectTab('library');
   }
   function init() {
-    for(const c of C.CATEGORIES){$('#categoryFilter').insertAdjacentHTML('beforeend',`<option value="${html(c)}">${html(c)}</option>`);$('#formCategory').insertAdjacentHTML('beforeend',`<option value="${html(c)}">${html(c)}</option>`);}
-    $('#categoryFilter').insertAdjacentHTML('afterbegin','<option value="all" selected>All categories</option>');
+    // Category lists are filled from the account's own categories in render().
     document.addEventListener('click',evt=>{
       const tab=evt.target.closest('[data-tab]');if(tab){selectTab(tab.dataset.tab);return;}
       const coll=evt.target.closest('[data-collection]');if(coll){activeCollection=coll.dataset.collection;selectTab('library');return;}
@@ -339,6 +432,8 @@
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
     $('#analyzeLinks').addEventListener('click',analyzeLinks);
     $('#viewEnriched').addEventListener('click',viewEnriched);
+    $('#settingsPage').addEventListener('change',settingsChange);
+    $('#settingsPage').addEventListener('click',settingsClick);
     $('#cancelAnalyze').addEventListener('click',()=>{stopAnalysis=true;});
     $('#newCollection').addEventListener('click',addCollection);
     $('#editForm').addEventListener('submit',editorSave);
@@ -383,6 +478,7 @@
     state = saved && Array.isArray(saved.records) ? {...emptyState(),...saved} : emptyState();
     if(!Array.isArray(state.plan))state.plan=[];
     if(!Array.isArray(state.collections))state.collections=[];
+    const setup=C.ensureSetup(state);state=setup.state;return setup;
   }
   function authUI() {
     const form=$('#authForm'), toggle=$('#authToggle'), head=$('#authHeading');
@@ -409,10 +505,12 @@
     };
   }
   async function enter() {
-    const saved=await Cloud.load();applyState(saved);
+    const saved=await Cloud.load();const setup=applyState(saved);
     $('#authGate').hidden=true;$('#appShell').hidden=false;
     $('#saveStatus').textContent='Saved to your account';
     init();
+    if(setup.needsChoice)openStarterDialog();
+    else if(setup.migrated)commit();
   }
   document.addEventListener('DOMContentLoaded',async()=>{
     authUI();
@@ -429,6 +527,7 @@
       for(const record of legacy.records){if(!known.has(record.key||record.url)){state.records.push(record);known.add(record.key||record.url);added++;}}
       for(const c of legacy.collections||[])if(!state.collections.includes(c))state.collections.push(c);
       if(!state.plan.length)state.plan=legacy.plan||[];
+      if(Array.isArray(state.categories))state=C.addMissingCategories(state);
       commit();toast('Imported '+added+' discoveries from this browser.');
     });
     try {if(await Cloud.me())await enter();}

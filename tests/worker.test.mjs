@@ -66,3 +66,16 @@ test('a refused link says why, and costs no lookup', async (t) => {
   assert.equal(body.status, 'rejected');
   assert.equal(spy.mock.callCount(), 0);
 });
+
+test('a library with categories and settings saves; a broken one does not', async () => {
+  const save = state => worker.fetch(new Request('https://clipatlas.example/api/library', {
+    method: 'PUT', body: JSON.stringify({ state, revision: 0 }),
+    headers: { origin: 'https://clipatlas.example', cookie: `clipatlas_session=${TOKEN}`, 'content-type': 'application/json' },
+  }), fakeEnv());
+  const base = { version: 1, records: [], collections: [], plan: [] };
+  assert.equal((await save({ ...base, categories: [{ name: 'Food', emoji: 'x', words: [] }], settings: { purpose: 'travel', tabs: { itinerary: true } } })).status, 200);
+  assert.equal((await save(base)).status, 200, 'libraries from before still save');
+  assert.equal((await save({ ...base, categories: 'Food' })).status, 400);
+  assert.equal((await save({ ...base, categories: Array(101).fill({ name: 'x' }) })).status, 400);
+  assert.equal((await save({ ...base, settings: [] })).status, 400);
+});

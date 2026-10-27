@@ -42,9 +42,19 @@ test('merge keeps previous edited notes but imports missing collections',()=>{
 test('invalid record rejected and not merged',()=>{
  const m=C.mergeRecords([],[{url:'https://example.com/foo'}, {url:long}]);assert.equal(m.added,1);assert.equal(m.invalid,1);
 });
-test('plain category hints do not invent venue names',()=>{
+test('importing never guesses a category or a venue; sorting is separate',()=>{
  const r=C.createRecord({url:long,caption:'Taipei street food night market'});
- assert.equal(r.category,'Taiwan · Food');assert.equal(r.place,'');
+ assert.equal(r.category,'Unsorted');assert.equal(r.place,'');
+ const {state}=C.ensureSetup({version:1,records:[r],collections:[],plan:[]});
+ assert.equal(C.sortUnsorted(state.records,state.categories),1);
+ assert.equal(state.records[0].category,'Taiwan · Food');
+ assert.deepEqual(state.records[0].autoSorted.words,['taipei+food','night market']);
+ assert.equal(state.records[0].place,'');
+});
+test('a CSV can bring its own category names',()=>{
+ assert.equal(C.createRecord({url:long,category:'Hikes to try'}).category,'Hikes to try');
+ assert.equal(C.createRecord({url:long,category:'Taiwan Food'}).category,'Taiwan · Food','first-version name');
+ assert.equal(C.createRecord({url:long,category:'unsorted'}).category,'Unsorted');
 });
 test('itinerary export includes original source and notes',()=>{
  const r=C.createRecord({url:long,title:'Visit place',notes:'verify hours'});
@@ -86,4 +96,90 @@ test('backups and edits keep the analysis result',()=>{
  const r=C.createRecord({url:'https://www.tiktok.com/share/video/'+ID,enrichment:{status:'enriched',reason:'ENRICHED',at:'2026-10-27T00:00:00Z',extra:'x'}});
  assert.deepEqual(r.enrichment,{status:'enriched',reason:'ENRICHED',retryable:false,at:'2026-10-27T00:00:00Z'});
  assert.equal(C.createRecord({url:'https://www.tiktok.com/share/video/'+ID,enrichment:{status:'bogus'}}).enrichment,undefined);
+});
+
+// ---- categories each account makes
+const R=(category,extra={})=>({...C.createRecord({url:'https://www.tiktok.com/@a/video/'+String(7345678901234567000+Math.floor(Math.random()*999)),category}),...extra});
+test('an account from before keeps its categories and its Itinerary',()=>{
+ const old={version:1,records:[R('Taiwan · Food'),R('Other'),R('Taiwan Food'),R('Hikes')],collections:[],plan:[{id:'p',recordId:'x',day:1}]};
+ const {state,migrated,needsChoice}=C.ensureSetup(old);
+ assert.equal(migrated,true);assert.equal(needsChoice,false);
+ const names=state.categories.map(c=>c.name);
+ assert.deepEqual(names.slice(0,7),C.LEGACY.map(x=>x[0]));
+ assert.ok(names.includes('Hikes'),'a name clips use is kept');
+ assert.deepEqual(state.records.map(r=>r.category),['Taiwan · Food','Other','Taiwan · Food','Hikes']);
+ assert.equal(state.settings.tabs.itinerary,true);
+ assert.equal(C.ensureSetup(state).migrated,false,'only once');
+});
+test('a new account picks a starter set; Start empty has no categories and no Itinerary',()=>{
+ const fresh={version:1,records:[],collections:[],plan:[]};
+ assert.equal(C.ensureSetup(fresh).needsChoice,true);
+ const research=C.applyStarter(fresh,'research');
+ assert.deepEqual(research.categories.map(c=>c.name),['Explainers','Studies & data','How-to','Opinions','Resources']);
+ assert.equal(research.settings.tabs.itinerary,false);assert.equal(research.settings.purpose,'research');
+ assert.equal(C.applyStarter(fresh,'travel').settings.tabs.itinerary,true);
+ const empty=C.applyStarter(fresh,'empty');assert.deepEqual(empty.categories,[]);assert.equal(empty.settings.tabs.itinerary,false);
+ assert.equal(C.ensureSetup(empty).needsChoice,false);
+});
+test('adding a starter set later keeps your own categories and tabs',()=>{
+ const mine={version:1,records:[],collections:[],plan:[],categories:[{name:'Food',emoji:'🥟',words:['dumplings']}],settings:{purpose:'custom',tabs:{itinerary:false}}};
+ const more=C.applyStarter(mine,'travel',{keepTabs:true});
+ assert.equal(more.categories[0].emoji,'🥟','yours wins over the starter with the same name');
+ assert.equal(more.categories.filter(c=>c.name==='Food').length,1);
+ assert.ok(more.categories.some(c=>c.name==='Stays'));
+ assert.equal(more.settings.tabs.itinerary,false);
+});
+test('sort words: whole short words, phrases, a+b pairs, hashtags, Chinese, ties go to the higher category',()=>{
+ const cats=C.normalizeCategories([{name:'Food',words:'eat, night market, food'},{name:'Taiwan food',words:['taipei + food','夜市']},{name:'Tea',words:['tea']}]);
+ assert.deepEqual(cats[1].words,['taipei+food','夜市']);
+ assert.equal(C.suggestCategory('Best night market food in Taipei',cats).name,'Food','3 words beat a pair');
+ assert.equal(C.suggestCategory('Taipei food tour',cats).name,'Taiwan food','a pair beats one word');
+ assert.equal(C.suggestCategory('#taiwanfood haul',cats).name,'Food','found inside a hashtag');
+ assert.equal(C.suggestCategory('士林夜市',cats).name,'Taiwan food');
+ assert.equal(C.suggestCategory('great seats here',cats),null,'"eat" is not in "seats"');
+ assert.equal(C.suggestCategory('steak and teas',cats).name,'Tea','plural of a short word');
+ assert.equal(C.suggestCategory('',cats),null);
+ const tie=C.normalizeCategories([{name:'A',words:['coffee']},{name:'B',words:['coffee']}]);
+ assert.equal(C.suggestCategory('coffee',tie).name,'A');
+});
+test('sorting only touches Unsorted clips and says why',()=>{
+ const cats=C.normalizeCategories([{name:'Food',words:['ramen']}]);
+ const a=R('Unsorted',{title:'Best ramen'}),b=R('Hikes',{title:'ramen after a hike'}),c=R('Unsorted',{title:'nothing'});
+ assert.equal(C.sortUnsorted([a,b,c],cats,'2026-10-27T00:00:00Z'),1);
+ assert.equal(a.category,'Food');assert.deepEqual(a.autoSorted,{name:'Food',words:['ramen'],at:'2026-10-27T00:00:00Z'});
+ assert.equal(b.category,'Hikes');assert.equal(c.category,'Unsorted');
+});
+test('rename moves every clip; duplicates and "Unsorted" are refused',()=>{
+ const s0={records:[R('Food',{autoSorted:{name:'Food',words:['x']}}),R('Hikes')],categories:C.normalizeCategories([{name:'Food'},{name:'Hikes'}])};
+ const {state}=C.renameCategory(s0,'Food','Eats');
+ assert.deepEqual(state.categories.map(c=>c.name),['Eats','Hikes']);
+ assert.equal(state.records[0].category,'Eats');assert.equal(state.records[0].autoSorted.name,'Eats');
+ assert.match(C.renameCategory(s0,'Food','hikes').error,/already have/);
+ assert.ok(C.renameCategory(s0,'Food','Unsorted').error);
+ assert.ok(C.renameCategory(s0,'Food','  ').error);
+});
+test('delete sends clips to Unsorted, or merges them into another category',()=>{
+ const s0={records:[R('Food'),R('Hikes')],categories:C.normalizeCategories([{name:'Food'},{name:'Hikes'},{name:'Eats'}])};
+ const gone=C.deleteCategory(s0,'Food');
+ assert.deepEqual(gone.categories.map(c=>c.name),['Hikes','Eats']);assert.equal(gone.records[0].category,'Unsorted');
+ const merged=C.deleteCategory(s0,'Food','Eats');assert.equal(merged.records[0].category,'Eats');
+ assert.equal(C.deleteCategory(s0,'Food','Nope').records[0].category,'Unsorted');
+});
+test('category lists are cleaned: names, duplicates, Unsorted, limits',()=>{
+ const cats=C.normalizeCategories([{name:'  Food  '},{name:'food'},{name:'Unsorted'},{name:''},null,{name:'x'.repeat(80),words:Array(60).fill(0).map((_,i)=>'w'+i)}]);
+ assert.deepEqual(cats.map(c=>c.name.length),[4,40]);
+ assert.equal(cats[1].words.length,40);assert.ok(cats.every(c=>c.id&&c.emoji));
+ assert.equal(C.normalizeCategories(Array(150).fill(0).map((_,i)=>({name:'c'+i}))).length,100);
+});
+test('categories a CSV brings are added to the list',()=>{
+ const s0={records:[R('Hikes'),R('Unsorted')],categories:[]};
+ assert.deepEqual(C.addMissingCategories(s0).categories.map(c=>c.name),['Hikes']);
+});
+test('every file the page loads exists',()=>{
+ const fs=require('node:fs'),path=require('node:path');
+ const pub=path.join(__dirname,'..','public');
+ const page=fs.readFileSync(path.join(pub,'index.html'),'utf8');
+ const files=[...page.matchAll(/(?:src|href)="([^"#:]+\.(?:js|css))"/g)].map(m=>m[1]);
+ assert.ok(files.length>=4,files.join(','));
+ for(const f of files)assert.ok(fs.existsSync(path.join(pub,f)),'public/'+f+' is missing');
 });

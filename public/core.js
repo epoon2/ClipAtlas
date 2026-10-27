@@ -5,10 +5,6 @@
   root.ClipAtlasCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const CATEGORIES = [
-    'Unsorted', 'Taiwan · Food', 'Taiwan · Shopping', 'Taiwan · Activities',
-    'Dates & restaurants', 'Travel ideas', 'Points & miles', 'Other'
-  ];
   const HOSTS = new Set(['tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'vm.tiktok.com',
     'vt.tiktok.com', 'tiktokv.com', 'www.tiktokv.com']);
   const isoNow = () => new Date().toISOString();
@@ -118,19 +114,6 @@
     const rows = records.map(v => ({ ...v, collection: (v.collections || []).join(' | '), tags: (v.tags || []).join(' | ') }));
     return [CSV_FIELDS.join(','), ...rows.map(v => CSV_FIELDS.map(f => csvEscape(v[f])).join(','))].join('\r\n') + '\r\n';
   }
-  function inferCategory(text) {
-    const t = safeString(text).toLowerCase();
-    if (!t) return '';
-    if (/(points?|miles?|transfer bonus|amex|chase sapphire|bilt|award (flight|travel|space)|airline loyalty)/.test(t)) return 'Points & miles';
-    if (/(taiwan|taipei|台灣|台北|taichung|tainan|kaohsiung)/.test(t)) {
-      if (/(food|eat|restaurant|night market|boba|cafe|coffee|brunch|noodle|dessert|美食|夜市)/.test(t)) return 'Taiwan · Food';
-      if (/(shop|store|shopping|mall|boutique|buy|purchase|逛街|購物)/.test(t)) return 'Taiwan · Shopping';
-      return 'Taiwan · Activities';
-    }
-    if (/(date night|date idea|romantic|anniversary|couple|dinner date)/.test(t)) return 'Dates & restaurants';
-    if (/(trip|itinerary|vacation|destination|travel guide|things to do)/.test(t)) return 'Travel ideas';
-    return '';
-  }
   function toDate(v) {
     const s = safeString(v);
     if (!s) return '';
@@ -147,13 +130,12 @@
     const title = safeString(getter('title', 'name'));
     const caption = safeString(getter('caption', 'description', 'videoDescription'));
     const notes = safeString(getter('notes', 'note'));
-    const specifiedCategory = safeString(getter('category'));
-    const category = (specifiedCategory && specifiedCategory !== 'Unsorted' ? specifiedCategory : inferCategory([title, caption, notes].join(' ')) || specifiedCategory) || 'Unsorted';
+    const category = categoryName(getter('category')) || 'Unsorted';
     return {
       id: safeString(source.id) || 'clip-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 9),
       key: parsed.key, url: parsed.url, originalUrl: parsed.originalUrl,
       videoId: parsed.videoId, title, creator: safeString(getter('creator', 'username')),
-      caption, notes, category: CATEGORIES.includes(category) ? category : 'Other',
+      caption, notes, category,
       collections: uniq(splitList(getter('collections', 'collection'))),
       tags: uniq(splitList(getter('tags'))), place: safeString(getter('place', 'venue')),
       city: safeString(getter('city')), country: safeString(getter('country')),
@@ -162,6 +144,7 @@
       enrichment: cleanEnrichment(source.enrichment),
       enrichmentStatus: ['metadata', 'unavailable'].includes(source.enrichmentStatus) ? source.enrichmentStatus : undefined,
       enrichedAt: safeString(source.enrichedAt) || undefined,
+      autoSorted: cleanAutoSorted(source.autoSorted),
       createdAt: safeString(source.createdAt) || isoNow(), updatedAt: isoNow()
     };
   }
@@ -227,6 +210,198 @@
     }
     return { records: merged, added, duplicates, updated, invalid };
   }
+  /* ---- Categories each account makes for itself ------------------------------
+     A category is {id, name, emoji, words}. Clips refer to it by name ("Unsorted"
+     is built in and never stored). "words" are sort words: a clip whose title,
+     caption, notes or tags contain them is suggested for that category. A word
+     with "+" needs every part, so "taipei+food" matches "Taipei street food". */
+  const CATEGORY_MAX = 100;
+  const splitWords = v => Array.isArray(v) ? v : safeString(v).split(/[,\n，、]/);
+  function categoryName(value) {
+    const name = safeString(value).replace(/\s+/g, ' ').slice(0, 40);
+    const renamed = LEGACY_RENAMES[name] || name;
+    return renamed.toLowerCase() === 'unsorted' ? '' : renamed;
+  }
+  function cleanWord(word) {
+    return safeString(word).toLowerCase().replace(/\s+/g, ' ').replace(/\s*\+\s*/g, '+')
+      .replace(/^\++|\++$/g, '').slice(0, 40);
+  }
+  function newId() { return 'cat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+  function normalizeCategories(list) {
+    const out = [], seen = new Set();
+    for (const c of Array.isArray(list) ? list : []) {
+      if (!c || typeof c !== 'object') continue;
+      const name = categoryName(c.name);
+      if (!name || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      out.push({ id: safeString(c.id).slice(0, 40) || newId(), name, emoji: safeString(c.emoji).slice(0, 8) || '🔖',
+        words: uniq(splitWords(c.words).map(cleanWord)).slice(0, 40) });
+      if (out.length >= CATEGORY_MAX) break;
+    }
+    return out;
+  }
+  const fromSpec = rows => rows.map(([name, emoji, words]) => ({ name, emoji, words }));
+
+  // Starter sets offered when an account is new (and in Settings later).
+  const STARTERS = {
+    travel: { label: 'Travel planning', blurb: 'Food, shops, sights and trip days', hero: 'All the places you saved.', tabs: { itinerary: true }, categories: [
+      ['Food', '🍜', 'restaurant, food, eat, cafe, brunch, dessert, night market, street food, boba'],
+      ['Shopping', '🛍️', 'shopping, shop, store, mall, haul, souvenir'],
+      ['Things to do', '🏞️', 'things to do, hike, museum, attraction, beach, park, temple, viewpoint'],
+      ['Stays', '🏨', 'hotel, hostel, airbnb, resort, where to stay'],
+      ['Travel tips', '🧳', 'itinerary, packing, travel tips, visa, flight, airport'],
+      ['Points & miles', '✈️', 'points, miles, transfer partner, transfer bonus, credit card, amex, chase sapphire, award flight']] },
+    research: { label: 'Research', blurb: 'Explainers, studies and how-tos on a topic', hero: 'All the things you learned.', tabs: { itinerary: false }, categories: [
+      ['Explainers', '💡', 'explained, what is, why do, how does, history of, breakdown'],
+      ['Studies & data', '📊', 'study, studies, research, data, statistics, survey, percent, according to'],
+      ['How-to', '🛠️', 'how to, tutorial, step by step, guide, tips'],
+      ['Opinions', '💬', 'opinion, hot take, unpopular opinion, debate, review'],
+      ['Resources', '📚', 'book, podcast, website, app, tool, course']] },
+    recipes: { label: 'Recipes & cooking', blurb: 'Dinners, baking and quick meals', hero: 'All the recipes you saved.', tabs: { itinerary: false }, categories: [
+      ['Dinners', '🍲', 'dinner, pasta, chicken, beef, noodles, rice, curry, stir fry'],
+      ['Baking', '🧁', 'bake, baking, cake, cookie, bread, muffin, pastry'],
+      ['Quick & easy', '⏱️', 'quick, easy, 15 minute, 10 minute, air fryer, one pot, meal prep'],
+      ['Healthy', '🥗', 'healthy, salad, high protein, low carb, vegan, vegetarian'],
+      ['Drinks', '🍹', 'drink, smoothie, coffee, tea, cocktail, mocktail']] },
+    shopping: { label: 'Shopping & finds', blurb: 'Clothes, beauty, home and gifts', hero: 'All the finds you saved.', tabs: { itinerary: false }, categories: [
+      ['Clothes', '👗', 'outfit, clothes, dress, jeans, jacket, shoes, haul'],
+      ['Beauty', '💄', 'skincare, makeup, serum, sunscreen, hair, beauty'],
+      ['Home', '🏠', 'home, decor, kitchen, organization, cleaning, furniture'],
+      ['Tech', '🎧', 'tech, gadget, phone, laptop, headphones, charger'],
+      ['Gifts', '🎁', 'gift, gift ideas, present, birthday']] },
+    empty: { label: 'Start empty', blurb: 'No categories yet: make your own', hero: 'All the videos you saved.', tabs: { itinerary: false }, categories: [] }
+  };
+  // The first version's fixed list. Accounts from before custom categories keep
+  // it (with sort words that need Taiwan and the topic together).
+  const LEGACY = [
+    ['Taiwan · Food', '🍜', 'taiwan+food, taipei+food, taiwan+restaurant, taipei+restaurant, taipei+cafe, night market, 夜市, 小吃, 美食, 珍珠奶茶'],
+    ['Taiwan · Shopping', '🛍️', 'taiwan+shopping, taipei+shopping, taiwan+shop, taipei+shop, 逛街, 購物, 伴手禮'],
+    ['Taiwan · Activities', '🏮', 'taiwan+things to do, taipei+things to do, taiwan+itinerary, taipei+attractions, 九份, 十分, 景點'],
+    ['Dates & restaurants', '🌷', 'date night, date idea, romantic, anniversary, couples, 約會'],
+    ['Travel ideas', '🧳', 'travel, vacation, itinerary, things to do, trip, hotel'],
+    ['Points & miles', '✈️', 'points, miles, transfer partner, transfer bonus, amex, chase sapphire, capital one, bilt, award flight'],
+    ['Other', '🔖', '']
+  ];
+  // Names the first version's analysis wrote by mistake.
+  const LEGACY_RENAMES = { 'Taiwan Food': 'Taiwan · Food', 'Taiwan Shopping': 'Taiwan · Shopping',
+    'Taiwan Activities': 'Taiwan · Activities', 'Date Ideas': 'Dates & restaurants',
+    'Credit Card Points': 'Points & miles', 'Travel': 'Travel ideas', 'Uncategorized': 'Unsorted' };
+  const TABS = ['itinerary'];
+
+  function cleanSettings(x) {
+    const purpose = x && (STARTERS[x.purpose] || x.purpose === 'custom') ? x.purpose : 'custom';
+    const tabs = x && x.tabs && typeof x.tabs === 'object' ? x.tabs : {};
+    return { purpose, tabs: Object.fromEntries(TABS.map(t => [t, tabs[t] !== false])) };
+  }
+  /** {state, migrated, needsChoice}: a library with categories and settings.
+      A brand-new account (nothing saved yet) needs to pick a starter set. */
+  function ensureSetup(input) {
+    const state = { ...input };
+    if (Array.isArray(state.categories)) {
+      state.categories = normalizeCategories(state.categories);
+      state.settings = cleanSettings(state.settings || { purpose: 'custom' });
+      return { state, migrated: false, needsChoice: false };
+    }
+    const records = Array.isArray(state.records) ? state.records : [];
+    const used = records.length || (state.plan || []).length || (state.collections || []).length;
+    if (!used) return { state, migrated: false, needsChoice: true };
+    state.records = records.map(r => {
+      const name = categoryName(r.category);
+      return name === r.category ? r : { ...r, category: name || 'Unsorted' };
+    });
+    const list = fromSpec(LEGACY);
+    for (const r of state.records) {
+      const name = categoryName(r.category);
+      if (name && !list.some(c => c.name.toLowerCase() === name.toLowerCase())) list.push({ name, emoji: '🔖', words: [] });
+    }
+    state.categories = normalizeCategories(list);
+    state.settings = cleanSettings(state.settings || { purpose: 'travel', tabs: { itinerary: true } });
+    return { state, migrated: true, needsChoice: false };
+  }
+  /** Add a starter set's categories (keeping the account's own) and, unless
+      {keepTabs:true}, switch to its tabs. */
+  function applyStarter(state, key, { keepTabs = false } = {}) {
+    const starter = STARTERS[key];
+    if (!starter) return state;
+    const categories = normalizeCategories([...(state.categories || []), ...fromSpec(starter.categories)]);
+    const settings = keepTabs ? cleanSettings(state.settings) : cleanSettings({ purpose: key, tabs: starter.tabs });
+    return { ...state, categories, settings };
+  }
+
+  const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function hasWord(text, part) {
+    // Phrases, long words and non-Latin words match anywhere (so "food" is
+    // found in #taiwanfood); short Latin words only as whole words.
+    if (/[^ -~]/.test(part) || part.length >= 4 || part.includes(' ')) return text.includes(part);
+    return new RegExp('(^|[^a-z0-9])' + escapeRe(part) + 's?($|[^a-z0-9])').test(text);
+  }
+  /** The best category for a text, or null: {name, words}. The category with
+      the most matching sort words wins ("a+b" counts as two); a tie goes to the
+      one higher in the list. */
+  function suggestCategory(text, categories) {
+    const t = ' ' + safeString(text).toLowerCase().replace(/\s+/g, ' ') + ' ';
+    if (!t.trim()) return null;
+    let best = null;
+    for (const c of categories || []) {
+      let score = 0; const words = [];
+      for (const w of c.words || []) {
+        const parts = w.split('+').filter(Boolean);
+        if (parts.length && parts.every(p => hasWord(t, p))) { score += parts.length; words.push(w); }
+      }
+      if (score > (best ? best.score : 0)) best = { name: c.name, words, score };
+    }
+    return best ? { name: best.name, words: best.words } : null;
+  }
+  function clipText(r) {
+    return [r.title, r.caption, r.notes, (r.tags || []).join(' ')].filter(Boolean).join(' ');
+  }
+  /** Sort Unsorted clips into categories by their text. Changes the clips in
+      place (r.category, and r.autoSorted saying why); returns how many moved. */
+  function sortUnsorted(records, categories, now = isoNow()) {
+    let moved = 0;
+    for (const r of records) {
+      if (r.category && r.category !== 'Unsorted') continue;
+      const hit = suggestCategory(clipText(r), categories);
+      if (!hit) continue;
+      r.category = hit.name;
+      r.autoSorted = { name: hit.name, words: hit.words.slice(0, 6), at: now };
+      moved++;
+    }
+    return moved;
+  }
+  function cleanAutoSorted(a) {
+    if (!a || typeof a !== 'object' || !safeString(a.name)) return undefined;
+    return { name: safeString(a.name).slice(0, 40), words: (Array.isArray(a.words) ? a.words : []).map(cleanWord).filter(Boolean).slice(0, 6),
+      at: safeString(a.at).slice(0, 40) };
+  }
+  /** {state} with the category renamed everywhere, or {error}. */
+  function renameCategory(state, from, to) {
+    const name = categoryName(to);
+    if (!name) return { error: 'Give the category a name (not "Unsorted").' };
+    const list = state.categories || [];
+    if (list.some(c => c.name !== from && c.name.toLowerCase() === name.toLowerCase())) return { error: 'You already have a category called "' + name + '".' };
+    return { state: { ...state,
+      categories: list.map(c => c.name === from ? { ...c, name } : c),
+      records: (state.records || []).map(r => r.category === from ? { ...r, category: name,
+        autoSorted: r.autoSorted && r.autoSorted.name === from ? { ...r.autoSorted, name } : r.autoSorted } : r) } };
+  }
+  /** Remove a category; its clips move to ``moveTo`` (default Unsorted). */
+  function deleteCategory(state, name, moveTo = 'Unsorted') {
+    const target = moveTo && (state.categories || []).some(c => c.name === moveTo && c.name !== name) ? moveTo : 'Unsorted';
+    return { ...state,
+      categories: (state.categories || []).filter(c => c.name !== name),
+      records: (state.records || []).map(r => r.category === name ? { ...r, category: target, autoSorted: undefined } : r) };
+  }
+  /** Make sure every category a clip uses is in the list (CSV imports, restores). */
+  function addMissingCategories(state) {
+    const list = [...(state.categories || [])];
+    for (const r of state.records || []) {
+      const name = categoryName(r.category);
+      if (name && !list.some(c => c.name.toLowerCase() === name.toLowerCase())) list.push({ name, emoji: '🔖', words: [] });
+    }
+    return list.length === (state.categories || []).length ? state : { ...state, categories: normalizeCategories(list) };
+  }
+
   function planMarkdown(items, records, title) {
     const byId = new Map(records.map(v => [v.id, v]));
     const groups = new Map();
@@ -251,5 +426,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { CATEGORIES, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, inferCategory, planMarkdown };
+  return { STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

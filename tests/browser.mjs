@@ -96,6 +96,10 @@ await page.fill('#authPassword', 'a-long-enough-password');
 await page.click('#authSubmit');
 await page.waitForSelector('#appShell:not([hidden])');
 check('signs up and opens the library', true);
+await page.waitForSelector('#starterDialog[open]');
+check('a new account is asked what it is for', (await page.$$('#starterChoices [data-starter]')).length === 5);
+await page.click('[data-starter="travel"]');
+check('the Travel starter keeps the Itinerary tab', await page.isVisible('.nav-link[data-tab="itinerary"]'));
 
 const zw = String.fromCharCode(0x200b);
 await page.click('[data-tab="import"]');
@@ -126,7 +130,9 @@ const cards = await page.$$eval('#clipGrid .clip-card', els => els.map(e => ({
 check('"View filled-in clips" shows exactly the two', cards.length === 2, JSON.stringify(cards.map(c => c.title)));
 check('their badge says Filled in', cards.every(c => c.badge === 'Filled in'));
 check('their links now use the full TikTok address', cards.every(c => /tiktok\.com\/@\w+\/video\/\d+$/.test(c.href)), cards.map(c => c.href).join(' '));
-check('a suggested category was applied', (await page.$$eval('#clipGrid .category', els => els.map(e => e.textContent))).includes('Taiwan · Food'));
+const sorted = await page.$$eval('#clipGrid .clip-card', els => els.map(e => [e.querySelector('.category').textContent, e.querySelector('.sorted-why')?.textContent || '']));
+check('clips are sorted into the account\'s categories, with the reason shown',
+  sorted.some(([c, why]) => c === 'Food' && /food|night market/.test(why)) && sorted.some(([c]) => c === 'Shopping'), JSON.stringify(sorted));
 
 await page.selectOption('#analysisFilter', 'all');
 const badges = await page.$$eval('#clipGrid .analysis-badge', els => els.map(e => e.textContent).sort());
@@ -138,7 +144,66 @@ await page.waitForSelector('#appShell:not([hidden])');
 await page.selectOption('#analysisFilter', 'enriched');
 check('results survive a reload', (await page.$$('#clipGrid .clip-card')).length === 2);
 check('nothing is waiting right after the run', /Every unreviewed link has been looked up/.test(await page.textContent('#analysisWaiting')));
+
+// ---- Settings: rename, delete, add, turn the Itinerary off
+await page.click('.nav-link[data-tab="settings"]');
+const rowFor = name => page.locator('.cat-row', { has: page.locator(`input.cat-name[value="${name}"]`) });
+await rowFor('Food').locator('input.cat-name').fill('Eats');
+await rowFor('Food').locator('input.cat-name').press('Tab');
+page.once('dialog', d => d.accept());
+await rowFor('Stays').locator('[data-cat-delete]').click();
+await page.fill('#newCatName', 'Hikes'); await page.fill('#newCatWords', 'hike, trail'); await page.click('#addCategory');
+const names = await page.$$eval('#categoryRows input.cat-name', els => els.map(e => e.value));
+check('rename, delete and add work', names.includes('Eats') && !names.includes('Stays') && names.at(-1) === 'Hikes', names.join(', '));
+await page.uncheck('#tabItinerary');
+check('the Itinerary tab can be turned off', !(await page.isVisible('.nav-link[data-tab="itinerary"]')));
+await page.click('.nav-link[data-tab="library"]');
+await page.selectOption('#analysisFilter', 'all');
+check('renamed category follows its clips', (await page.$$eval('#clipGrid .category', els => els.map(e => e.textContent))).includes('Eats'));
+check('no "+ Plan" buttons without the Itinerary', (await page.$$('[data-action="plan"]')).length === 0);
+check('the category filter lists the account\'s categories', (await page.$$eval('#categoryFilter option', els => els.map(e => e.value))).includes('Hikes'));
+await page.waitForTimeout(600);
+await page.waitForFunction(() => /Saved to your account/.test(document.getElementById('saveStatus').textContent));
+await page.reload(); await page.waitForSelector('#appShell:not([hidden])');
+console.log('     after reload: itinerary visible=' + await page.isVisible('.nav-link[data-tab="itinerary"]') + ', starter open=' + await page.isVisible('#starterDialog'));
+check('settings survive a reload, and the starter question is not asked again',
+  !(await page.isVisible('.nav-link[data-tab="itinerary"]')) && !(await page.isVisible('#starterDialog')));
+
 await page.screenshot({ path: process.env.SHOT || '/tmp/clipatlas.png', fullPage: true });
+await page.click('.nav-link[data-tab="settings"]');
+await page.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-settings.png'), fullPage: true });
+
+// ---- an account from before categories keeps its list and its Itinerary
+async function api(path, method, body, cookie) {
+  const res = await worker.fetch(new Request(base + 'api/' + path, { method, body: body && JSON.stringify(body),
+    headers: { origin: base.replace(/\/$/, ''), 'content-type': 'application/json', ...(cookie ? { cookie } : {}) } }), env);
+  return res;
+}
+const reg = await api('register', 'POST', { email: 'old@example.com', password: 'a-long-enough-password', displayName: 'Old' });
+const cookie = reg.headers.get('set-cookie').split(';')[0];
+await api('library', 'PUT', { revision: 0, state: { version: 1, collections: [], plan: [], tripTitle: 'Taiwan', dayCount: 7,
+  records: [{ id: 'r1', key: 'tiktok:7000000000000000009', url: 'https://www.tiktok.com/share/video/7000000000000000009', title: 'Taipei food crawl',
+    category: 'Taiwan · Food', collections: [], tags: [], status: 'unreviewed', createdAt: '2026-10-01', updatedAt: '2026-10-01' }] } }, cookie);
+const old = await (await browser.newContext()).newPage();
+await old.goto(base); await old.fill('#authEmail', 'old@example.com'); await old.fill('#authPassword', 'a-long-enough-password');
+await old.click('#authSubmit'); await old.waitForSelector('#appShell:not([hidden])');
+await old.waitForTimeout(300);
+check('an existing account is not asked to choose', !(await old.isVisible('#starterDialog')));
+check('it keeps the Itinerary', await old.isVisible('.nav-link[data-tab="itinerary"]'));
+await old.click('.nav-link[data-tab="settings"]');
+const oldNames = await old.$$eval('#categoryRows input.cat-name', els => els.map(e => e.value));
+check('it keeps the first version\'s categories', oldNames[0] === 'Taiwan · Food' && oldNames.includes('Points & miles'), oldNames.join(', '));
+
+// ---- a research account has no Itinerary
+const res = await (await browser.newContext()).newPage();
+await res.goto(base); await res.click('#authToggle');
+await res.fill('#authDisplay', 'R'); await res.fill('#authEmail', 'r@example.com'); await res.fill('#authPassword', 'a-long-enough-password');
+await res.click('#authSubmit'); await res.waitForSelector('#starterDialog[open]');
+await res.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-starter.png') });
+await res.click('[data-starter="research"]');
+check('Research: no Itinerary tab', !(await res.isVisible('.nav-link[data-tab="itinerary"]')));
+check('Research: its own heading', (await res.textContent('#heroTitle')) === 'All the things you learned.');
+
 check('no page errors', errors.length === 0, errors.join(' | '));
 
 await browser.close();
