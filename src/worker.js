@@ -1,8 +1,10 @@
 // ClipAtlas API — Cloudflare Worker + D1, with a private library per account.
 import {readTikTokLink,lookupTikTok,MESSAGES} from './tiktok.js';
+import {readUnderstandRequest,understandClip,MESSAGES as UNDERSTAND} from './understand.js';
 const encoder = new TextEncoder();
 const JSON_HEADERS = {'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
 const MAX_STATE = 2 * 1024 * 1024;
+const UNDERSTAND_MAX = 5 * 1024 * 1024;
 const SESSION_DAYS = 14;
 const bad = (message,status=400) => response({error:message},status);
 function response(data,status=200,headers={}) {return new Response(JSON.stringify(data),{status,headers:{...JSON_HEADERS,...headers}});}
@@ -57,6 +59,17 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   if(!link.ok)return response({error:MESSAGES[link.reason],status:'rejected',reason:link.reason,retryable:false,available:false},400);
   if(await blocked(env,'enrich:'+user.id,180,3600000))return response({error:'Metadata lookup limit reached; retry in an hour',status:'failed',reason:'CLIPATLAS_LIMIT',retryable:true,available:false},429);
   return response(await lookupTikTok(body.url));
+ }
+ // Auto-review: a clip's recorded sound and screenshots in, its details out.
+ if(path==='/api/understand'&&method==='POST'){
+  if(!env.AI)return response({error:'Auto-review is not set up on this server.',status:'failed',reason:'AI_NOT_SET_UP'},503);
+  let body;try{body=await jsonBody(req,UNDERSTAND_MAX);}catch{return response({error:UNDERSTAND.BAD_INPUT,status:'failed',reason:'BAD_INPUT'},400);}
+  const request=readUnderstandRequest(body);
+  if(!request.ok)return response({error:UNDERSTAND.BAD_INPUT,status:'failed',reason:'BAD_INPUT'},400);
+  const daily=Math.max(1,Number(env.AUTO_REVIEW_DAILY_LIMIT)||300);
+  if(await blocked(env,'understand:'+user.id,daily,86400000))return response({error:`Auto-review limit reached (${daily} clips a day); continue tomorrow.`,status:'failed',reason:'CLIPATLAS_LIMIT'},429);
+  const result=await understandClip(request,env.AI);
+  return response(result,result.reason==='AI_DAILY_LIMIT'?429:200);
  }
  if(path==='/api/library'&&method==='GET'){
   const found=await env.DB.prepare('SELECT json,revision FROM libraries WHERE user_id=?').bind(user.id).first();return response({state:found?JSON.parse(found.json):null,revision:found?.revision||0});

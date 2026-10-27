@@ -210,3 +210,44 @@ test('a review save keeps the link, creator and lookup; marks reviewed; explains
  const picked=C.reviewEdit(old,{...fields,category:'Shopping'},{reviewed:false,suggested:{name:'Food',words:['noodle']}});
  assert.equal(picked.status,'unreviewed'); assert.equal(picked.autoSorted,undefined,'a category the person picked needs no explanation');
 });
+test('auto-review queue: playable clips not tried yet; failed ones again; redo takes all',()=>{
+ const rec=[{id:'a',videoId:'7000000000000000001',status:'unreviewed',savedAt:'2026-01-03'},
+  {id:'b',videoId:'',url:'https://vm.tiktok.com/ZMabc/',status:'unreviewed',savedAt:'2026-01-02'},
+  {id:'c',videoId:'7000000000000000003',status:'unreviewed',savedAt:'2026-01-01',auto:{status:'empty'}},
+  {id:'d',videoId:'7000000000000000004',status:'unreviewed',savedAt:'2025-12-31',auto:{status:'failed'}}];
+ assert.deepEqual(C.autoQueue(rec,'review'),['a','d']);
+ assert.deepEqual(C.autoQueue(rec,'review',{redo:true}),['a','c','d']);
+ assert.match(C.playerUrl(rec[0],{auto:true}),/controls=0/);
+ assert.doesNotMatch(C.playerUrl(rec[0]),/controls=0/);
+});
+test('auto-review fills only what is empty, sorts Unsorted clips, keeps what was heard and seen',()=>{
+ const old=C.createRecord({id:'k',url:'https://www.tiktokv.com/share/video/7662085125500407061/',title:'',notes:'my note',
+  city:'Tainan',category:'Unsorted',tags:['saved']});
+ const res={status:'understood',reason:'UNDERSTOOD',heard:true,seen:true,transcript:'best beef noodles in taipei',
+  onScreen:'BEST NOODLES',summary:'A noodle stall.',title:'Beef noodle stall',category:'Food',place:'Lin Dong Fang',
+  city:'Taipei',country:'Taiwan',tags:['noodles','saved']};
+ const r=C.applyUnderstanding(old,res,{now:'2026-10-27T00:00:00Z'});
+ assert.deepEqual([r.title,r.category,r.place,r.city,r.country,r.caption,r.notes],
+  ['Beef noodle stall','Food','Lin Dong Fang','Tainan','Taiwan','BEST NOODLES','my note']);
+ assert.deepEqual(r.tags,['saved','noodles']);
+ assert.equal(r.status,'reviewed'); assert.equal(r.autoReviewed,true);
+ assert.equal(r.auto.transcript,'best beef noodles in taipei');
+ const kept=C.createRecord(r); assert.equal(kept.auto.summary,'A noodle stall.'); assert.equal(kept.autoReviewed,true);
+ const sorted=C.applyUnderstanding({...old,category:'Shopping'},res); assert.equal(sorted.category,'Shopping','a chosen category stays');
+ const notMarked=C.applyUnderstanding(old,res,{markReviewed:false}); assert.equal(notMarked.status,'unreviewed');
+ const empty=C.applyUnderstanding(old,{status:'empty',reason:'NOTHING_TO_READ'});
+ assert.deepEqual([empty.title,empty.status,empty.auto.status],['','unreviewed','empty']);
+ const checked=C.reviewEdit(r,{title:r.title,category:'Food',tags:'',collections:''});
+ assert.equal(checked.autoReviewed,undefined,'a person saving it clears the auto flag');
+ assert.equal(checked.auto.summary,'A noodle stall.');
+});
+test('sound helpers: WAV header, downsampling, loudness, screenshot times',()=>{
+ const w=C.wavBytes(new Float32Array([0,1,-1,0.5]),16000);
+ assert.equal(String.fromCharCode(...w.slice(0,4)),'RIFF'); assert.equal(String.fromCharCode(...w.slice(8,12)),'WAVE');
+ const v=new DataView(w.buffer); assert.equal(v.getUint32(24,true),16000); assert.equal(v.getUint32(40,true),8);
+ assert.equal(v.getInt16(46,true),32767); assert.equal(v.getInt16(48,true),-32768);
+ const d=C.downsample(new Float32Array(48000).fill(0.5),48000,16000); assert.equal(d.length,16000); assert.equal(d[100],0.5);
+ assert.equal(C.loudness(new Float32Array(10)),0); assert.ok(Math.abs(C.loudness(new Float32Array(10).fill(0.5))-0.5)<1e-6);
+ assert.deepEqual(C.shotTimes(45).map(t=>Math.round(t*10)/10),[1.2,20.3,36]);
+ assert.deepEqual(C.shotTimes(2).map(t=>Math.round(t*10)/10),[1.2]);
+});

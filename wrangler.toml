@@ -9,6 +9,11 @@ run_worker_first = ["/api/*"]
 
 [vars]
 REGISTRATION_ENABLED = "true"
+AUTO_REVIEW_DAILY_LIMIT = "300"
+
+# Workers AI, for auto-review (transcripts and reading screenshots).
+[ai]
+binding = "AI"
 
 [[d1_databases]]
 binding = "DB"

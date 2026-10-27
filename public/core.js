@@ -145,6 +145,7 @@
       enrichmentStatus: ['metadata', 'unavailable'].includes(source.enrichmentStatus) ? source.enrichmentStatus : undefined,
       enrichedAt: safeString(source.enrichedAt) || undefined,
       autoSorted: cleanAutoSorted(source.autoSorted),
+      auto: cleanAuto(source.auto), autoReviewed: source.autoReviewed === true || undefined,
       createdAt: safeString(source.createdAt) || isoNow(), updatedAt: isoNow()
     };
   }
@@ -369,6 +370,13 @@
     }
     return moved;
   }
+  const AUTO_STATUSES = ['understood', 'empty', 'unavailable', 'failed'];
+  function cleanAuto(a) {
+    if (!a || typeof a !== 'object' || !AUTO_STATUSES.includes(a.status)) return undefined;
+    return { status: a.status, reason: safeString(a.reason).slice(0, 40), at: safeString(a.at).slice(0, 40),
+      heard: !!a.heard, seen: !!a.seen, transcript: safeString(a.transcript).slice(0, 1200),
+      onScreen: safeString(a.onScreen).slice(0, 600), summary: safeString(a.summary).slice(0, 240) };
+  }
   function cleanAutoSorted(a) {
     if (!a || typeof a !== 'object' || !safeString(a.name)) return undefined;
     return { name: safeString(a.name).slice(0, 40), words: (Array.isArray(a.words) ? a.words : []).map(cleanWord).filter(Boolean).slice(0, 6),
@@ -405,9 +413,79 @@
   /* ---- Review mode ------------------------------------------------------------
      TikTok's official embedded player plays a video by its ID in the viewer's
      own browser: no lookup, no rate limit. */
-  function playerUrl(r) {
+  function playerUrl(r, { auto = false } = {}) {
     const id = r && safeString(r.videoId);
-    return /^\d{8,25}$/.test(id) ? `https://www.tiktok.com/player/v1/${id}?description=1&music_info=1&autoplay=1&rel=0` : '';
+    if (!/^\d{8,25}$/.test(id)) return '';
+    // Auto-review hides the controls so they do not cover the text on the video.
+    return `https://www.tiktok.com/player/v1/${id}?description=1&music_info=1&autoplay=1&rel=0` +
+      (auto ? '&controls=0&closed_caption=0' : '');
+  }
+
+  /* ---- Auto-review ------------------------------------------------------------
+     The page plays each clip in TikTok's player, records the tab's sound and
+     takes screenshots of the player; the Worker turns those into the details
+     below. These helpers are the parts that need no browser. */
+  const AUTO_LABELS = { understood: 'Auto-reviewed', empty: 'Nothing heard or seen', unavailable: 'Would not play',
+    failed: 'Auto-review failed' };
+  /** Clips for an auto-review run: the scope's clips that can play and have
+      not been tried yet (failed ones are tried again), or all with ``redo``. */
+  function autoQueue(records, scope, { redo = false } = {}) {
+    const byId = new Map((records || []).map(r => [r.id, r]));
+    return reviewQueue(records, scope).filter(id => {
+      const r = byId.get(id);
+      return playerUrl(r) && (redo || !r.auto || r.auto.status === 'failed');
+    });
+  }
+  /** One clip after auto-review: empty fields filled in, an Unsorted clip
+      sorted, tags added, and what was heard and seen kept (searchable). What
+      the person wrote is never replaced. */
+  function applyUnderstanding(record, result, { markReviewed = true, now = isoNow() } = {}) {
+    const res = result || {};
+    const next = { ...record, tags: [...(record.tags || [])] };
+    next.auto = cleanAuto({ ...res, status: AUTO_STATUSES.includes(res.status) ? res.status : 'failed', at: now });
+    next.updatedAt = now;
+    if (next.auto.status !== 'understood') return next;
+    const fill = (key, value, n) => { if (!safeString(next[key]) && safeString(value)) next[key] = safeString(value).slice(0, n); };
+    fill('title', res.title, 300); fill('place', res.place, 200); fill('city', res.city, 120); fill('country', res.country, 120);
+    fill('caption', res.onScreen, 2000);
+    const category = categoryName(res.category);
+    if ((!next.category || next.category === 'Unsorted') && category && category !== 'Unsorted') {
+      next.category = category; next.autoSorted = undefined;
+    }
+    next.tags = uniq([...next.tags, ...(Array.isArray(res.tags) ? res.tags.map(safeString) : [])]).slice(0, 20);
+    if (markReviewed && next.status !== 'reviewed') { next.status = 'reviewed'; next.autoReviewed = true; }
+    return next;
+  }
+  /** 16-bit mono WAV of ``samples`` (numbers from -1 to 1). */
+  function wavBytes(samples, rate) {
+    const n = samples.length, out = new Uint8Array(44 + n * 2), v = new DataView(out.buffer);
+    const text = (at, s) => { for (let i = 0; i < s.length; i++) out[at + i] = s.charCodeAt(i); };
+    text(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); text(8, 'WAVE'); text(12, 'fmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+    v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); text(36, 'data');
+    v.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) { const x = Math.max(-1, Math.min(1, samples[i] || 0)); v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true); }
+    return out;
+  }
+  /** Average ``samples`` from ``from`` Hz down to ``to`` Hz. */
+  function downsample(samples, from, to) {
+    if (to >= from) return Float32Array.from(samples);
+    const ratio = from / to, n = Math.floor(samples.length / ratio), out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * ratio), b = Math.min(samples.length, Math.floor((i + 1) * ratio));
+      let sum = 0; for (let j = a; j < b; j++) sum += samples[j];
+      out[i] = b > a ? sum / (b - a) : 0;
+    }
+    return out;
+  }
+  function loudness(samples) {
+    let sum = 0; for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    return samples.length ? Math.sqrt(sum / samples.length) : 0;
+  }
+  /** The seconds at which to take the screenshots, for a clip listened to for ``limit`` seconds. */
+  function shotTimes(limit) {
+    const want = [1.2, limit * 0.45, limit * 0.8].filter(t => t < limit);
+    return want.filter((t, i) => i === 0 || t - want[i - 1] >= 1);
   }
   const REVIEW_SCOPES = { review: 'Needs review', unsorted: 'Unsorted', all: 'All clips' };
   /** Clip ids to go through, newest saved first (the library's default order).
@@ -429,6 +507,7 @@
     const next = createRecord({ ...record, ...fields, status: reviewed ? 'reviewed' : 'unreviewed' });
     if (!next) return null;
     next.id = record.id; next.originalUrl = record.originalUrl || next.originalUrl;
+    next.autoReviewed = undefined;  // a person has looked at it now
     if (next.category === record.category) next.autoSorted = cleanAutoSorted(record.autoSorted);
     else if (suggested && suggested.name === next.category) next.autoSorted = { name: suggested.name, words: (suggested.words || []).slice(0, 6), at: now };
     else next.autoSorted = undefined;
@@ -459,5 +538,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, applyUnderstanding, wavBytes, downsample, loudness, shotTimes, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

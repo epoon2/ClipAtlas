@@ -125,9 +125,9 @@
     const category=$('#categoryFilter').value, status=$('#statusFilter').value, analysis=$('#analysisFilter').value;
     let records=state.records.filter(r=>(!activeCollection || (r.collections||[]).includes(activeCollection))
       && (category==='all'||r.category===category)
-      && (status==='all'||r.status===status)
+      && (status==='all'||(status==='auto'?r.autoReviewed===true:r.status===status))
       && (analysis==='all'||C.analysisState(r)===analysis)
-      && (!q || [r.title,r.url,r.creator,r.caption,r.notes,r.category,r.place,r.city,r.country,(r.collections||[]).join(' '),(r.tags||[]).join(' ')].join(' ').toLocaleLowerCase().includes(q)));
+      && (!q || [r.title,r.url,r.creator,r.caption,r.notes,r.category,r.place,r.city,r.country,(r.collections||[]).join(' '),(r.tags||[]).join(' '),r.auto?.transcript,r.auto?.onScreen,r.auto?.summary].join(' ').toLocaleLowerCase().includes(q)));
     const sort=$('#sortFilter').value;
     records.sort((a,b) => sort==='title'?(a.title||a.place||'').localeCompare(b.title||b.place||''):
       sort==='oldest'?(a.savedAt||a.createdAt).localeCompare(b.savedAt||b.createdAt):(b.savedAt||b.createdAt).localeCompare(a.savedAt||a.createdAt));
@@ -139,7 +139,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||r.auto.reason||'')}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -186,6 +186,7 @@
     const created=C.createRecord({...source,id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt});
     if(!created){$('#modalError').textContent='Invalid TikTok URL.';return;}
     if(old&&old.key===created.key){created.enrichment=old.enrichment;created.enrichedAt=old.enrichedAt;created.enrichmentStatus=old.enrichmentStatus;}
+    if(old)created.auto=old.auto;  // what auto-review heard and saw; the person has checked it now
     if(old&&old.category===created.category)created.autoSorted=old.autoSorted;
     if(old)state.records[state.records.indexOf(old)]={...created,id:old.id};else state.records.push(created);
     $('#editDialog').close();commit();toast(old?'Discovery updated':'New discovery saved');
@@ -485,6 +486,241 @@
       else if(mod&&evt.key==='Enter'){evt.preventDefault();reviewSave();}
     });
   }
+  /* ---- Auto-review: play each clip, record the tab's sound and screenshots, let the Worker fill it in ---- */
+  const AUTO_REASONS={NOTHING_TO_READ:'nothing heard or seen',NO_PLAYER:'player did not load',STALLED:'stopped playing',
+    NOT_FOUND:'removed or private',PLAYBACK:'would not play',AUTOPLAY:'blocked from playing',AI_FAILED:'AI problem',
+    BAD_INPUT:'could not be read',NETWORK:'connection problem'};
+  let auto=null; // the run in progress
+  const autoSupported=()=>!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia&&window.AudioWorkletNode&&!/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent));
+  function autoScopes(){
+    const redo=$('#autoRedo').checked;
+    const out=Object.entries(C.REVIEW_SCOPES).map(([k,label])=>[k,label,C.autoQueue(state.records,k,{redo}).length]);
+    for(const name of listCollections())out.push(['collection:'+name,'Collection: '+name,C.autoQueue(state.records,'collection:'+name,{redo}).length]);
+    return out;
+  }
+  function autoEstimate(){
+    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked});
+    const minutes=Math.ceil(queue.length*(Number($('#autoCap').value)+8)/60);
+    const short=state.records.filter(r=>!C.playerUrl(r)).length;
+    $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
+      (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
+    $('#autoStart').disabled=!queue.length||!autoSupported();
+  }
+  function openAuto(){
+    if(!state.records.length){toast('Import or add some clips first.');return;}
+    const pick=$('#autoScope'),keep=pick.value||'review';
+    pick.innerHTML=autoScopes().map(([k,label,n])=>`<option value="${html(k)}">${html(label)} (${n})</option>`).join('');
+    pick.value=[...pick.options].some(o=>o.value===keep)?keep:'review';
+    $('#autoSetup').hidden=false;$('#autoRun').hidden=true;$('#autoError').textContent='';
+    $('#autoStart').hidden=false;$('#autoStop').hidden=true;$('#autoBar').style.width='0%';
+    $('#autoHint').textContent=autoSupported()?'':'Auto-review needs Chrome or Edge on a computer.';
+    autoEstimate();
+    const dlg=$('#autoDialog');if(!dlg.open)dlg.showModal();
+  }
+  function autoSay(text){$('#autoNow').textContent=text;}
+  function autoCounts(){
+    const t=auto.tally;
+    $('#autoCounts').textContent=`${auto.index>=auto.queue.length?'All '+auto.queue.length+' clips':'Clip '+(auto.index+1)+' of '+auto.queue.length} · ${t.understood||0} filled in · ${t.empty||0} nothing heard or seen · ${t.unavailable||0} would not play · ${t.failed||0} failed`;
+    $('#autoBar').style.width=Math.round(auto.index/auto.queue.length*100)+'%';
+  }
+  function autoListItem(r,res){
+    const li=document.createElement('li');
+    const ok=res.status==='understood';
+    li.className=ok?'ok':'not';
+    const title=document.createElement('strong');title.textContent=ok?(r.title||'Untitled'):(r.title||'A clip');
+    li.append(title,document.createTextNode(ok?` → ${emojiFor(r.category)} ${r.category}${res.heard||res.seen?' (from '+[res.heard&&'what was said',res.seen&&'what was shown'].filter(Boolean).join(' and ')+')':''}`
+      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}`));
+    const list=$('#autoResults');list.prepend(li);while(list.children.length>8)list.lastChild.remove();
+  }
+  async function startAuto(){
+    if(auto)return;
+    $('#autoError').textContent='';
+    if(!autoSupported()){$('#autoError').textContent='Auto-review needs Chrome or Edge on a computer.';return;}
+    if(saveBlocked){$('#autoError').textContent='Resolve the save problem first (see the message at the top).';return;}
+    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked});
+    if(!queue.length)return;
+    let stream;
+    try{
+      stream=await navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'browser',frameRate:5},
+        audio:{suppressLocalAudioPlayback:true,echoCancellation:false,noiseSuppression:false,autoGainControl:false},
+        preferCurrentTab:true,selfBrowserSurface:'include',surfaceSwitching:'exclude',systemAudio:'exclude'});
+    }catch(err){
+      $('#autoError').textContent=err&&err.name==='NotAllowedError'?'Sharing was cancelled, so auto-review did not start.':'This browser would not share the tab ('+(err&&err.name||'error')+').';
+      return;
+    }
+    if(!stream.getAudioTracks().length){
+      stream.getTracks().forEach(t=>t.stop());
+      $('#autoError').textContent='The tab\'s sound was not shared. Press Start again and turn on "Also share tab audio".';return;
+    }
+    auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,cap:Number($('#autoCap').value),mark:$('#autoMark').checked,
+      chunks:[],recording:false};
+    $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
+    $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
+    let stopReason='';
+    try{
+      stream.getVideoTracks()[0].addEventListener('ended',()=>{if(!auto)return;auto.stop=true;auto.ended=true;auto.finishClip?.('SHARING_STOPPED');});
+      const ctx=new AudioContext();auto.ctx=ctx;
+      await ctx.audioWorklet.addModule('recorder.js');
+      const source=ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+      const node=new AudioWorkletNode(ctx,'clipatlas-recorder');auto.node=node;
+      const silent=ctx.createGain();silent.gain.value=0;
+      source.connect(node);node.connect(silent).connect(ctx.destination);
+      node.port.onmessage=e=>{if(auto&&auto.recording)auto.chunks.push(e.data);};
+      if(ctx.state!=='running')await ctx.resume();
+      const video=document.createElement('video');video.muted=true;video.playsInline=true;
+      video.srcObject=new MediaStream(stream.getVideoTracks());await video.play();auto.video=video;
+      try{auto.wake=await navigator.wakeLock?.request('screen');}catch(_){/* the screen may sleep; capture still works while the tab is open */}
+      for(;auto.index<auto.queue.length&&!auto.stop;auto.index++){
+        const r=state.records.find(x=>x.id===auto.queue[auto.index]);if(!r)continue;
+        autoCounts();
+        const res=await autoClip(r);
+        if(res.reason==='SHARING_STOPPED'||res.reason==='STOPPED')break;  // nothing saved for a clip cut short
+        if(res.stopRun){stopReason=res.message;break;}
+        const i=state.records.findIndex(x=>x.id===r.id);if(i<0)continue;
+        state.records[i]=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
+        auto.tally[res.status]=(auto.tally[res.status]||0)+1;
+        autoListItem(state.records[i],res);
+        commit();await persist();
+        if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';break;}
+        auto.failsInRow=res.status==='failed'?auto.failsInRow+1:0;
+        if(auto.failsInRow>=3){stopReason='Three clips in a row failed, so auto-review stopped. Try again later.';break;}
+      }
+    }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
+    finally{
+      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally;
+      autoCounts();
+      autoCleanup();
+      $('#autoStart').hidden=false;$('#autoStop').hidden=true;$('#autoHint').textContent='';
+      if(done)$('#autoBar').style.width='100%';
+      autoSay((stopReason||(done?'Done.':ended?'Tab sharing stopped, so auto-review stopped.':'Stopped.'))+` ${t.understood||0} filled in, ${t.empty||0} nothing heard or seen, ${t.unavailable||0} would not play, ${t.failed||0} failed.`+(t.understood?' Filter Discoveries by "Auto-reviewed" to check them.':''));
+      $('#autoStart').textContent='Start again';
+      render();
+    }
+  }
+  function autoCleanup(){
+    if(!auto)return;
+    try{auto.node&&auto.node.port.postMessage({record:false});}catch(_){}
+    try{auto.stream.getTracks().forEach(t=>t.stop());}catch(_){}
+    try{auto.ctx&&auto.ctx.close();}catch(_){}
+    try{auto.wake&&auto.wake.release();}catch(_){}
+    const note=document.createElement('p');note.className='player-none';note.textContent='Each clip plays here while it is reviewed.';
+    $('#autoFrame').replaceChildren(note);
+    auto=null;
+  }
+  // Take what the shared tab shows inside the player's box.
+  function autoShot(frame){
+    const v=auto.video;if(!v||!v.videoWidth)return null;
+    const box=frame.getBoundingClientRect(),sx=v.videoWidth/window.innerWidth,sy=v.videoHeight/window.innerHeight;
+    const w=270,h=480,c=document.createElement('canvas');c.width=w;c.height=h;
+    c.getContext('2d').drawImage(v,box.left*sx,box.top*sy,box.width*sx,box.height*sy,0,0,w,h);
+    return c;
+  }
+  function autoGrid(shots){
+    if(!shots.length)return '';
+    const c=document.createElement('canvas');c.width=270*shots.length;c.height=480;
+    const g=c.getContext('2d');shots.forEach((s,i)=>g.drawImage(s,i*270,0));
+    return c.toDataURL('image/jpeg',0.82);
+  }
+  function autoAudio(){
+    const total=auto.chunks.reduce((n,c)=>n+c.length,0);if(!total)return '';
+    const all=new Float32Array(total);let at=0;for(const c of auto.chunks){all.set(c,at);at+=c.length;}
+    const pcm=C.downsample(all,auto.ctx.sampleRate,16000);
+    if(C.loudness(pcm)<0.002)return '';
+    const bytes=C.wavBytes(pcm,16000);let bin='';
+    for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
+    return btoa(bin);
+  }
+  // Play one clip; resolve with what the Worker made of it (or why not).
+  function autoPlay(r){
+    return new Promise(resolve=>{
+      const box=$('#autoFrame'),frame=document.createElement('iframe');
+      frame.src=C.playerUrl(r,{auto:true});frame.title='TikTok video player';
+      frame.allow='autoplay; encrypted-media; fullscreen';frame.referrerPolicy='strict-origin-when-cross-origin';
+      box.replaceChildren(frame);
+      const started=Date.now();let ready=0,lastTick=0,limit=auto.cap,times=null,shots=[],timeEvents=false,unmutes=0,triedPlay=false,finished=false,now=0;
+      const send=type=>{try{frame.contentWindow.postMessage({type,value:null,'x-tiktok-player':true},'https://www.tiktok.com');}catch(_){}};
+      const shoot=()=>{const s=autoShot(frame);if(s)shots.push(s);};
+      const finish=reason=>{
+        if(finished)return;finished=true;
+        clearInterval(timer);window.removeEventListener('message',onMessage);
+        auto.recording=false;try{auto.node.port.postMessage({record:false});}catch(_){}
+        send('pause');auto.finishClip=null;
+        resolve({reason,shots,played:now});
+      };
+      auto.finishClip=finish;
+      const startListening=()=>{if(auto.recording)return;auto.chunks=[];auto.recording=true;auto.node.port.postMessage({record:true});};
+      const onMessage=e=>{
+        if(e.source!==frame.contentWindow||e.origin!=='https://www.tiktok.com')return;
+        let d=e.data;if(typeof d==='string'){try{d=JSON.parse(d);}catch(_){return;}}
+        if(!d||typeof d.type!=='string')return;
+        const v=d.value&&typeof d.value==='object'?d.value:d;
+        if(d.type==='onPlayerReady'){if(!ready){ready=Date.now();send('unMute');send('play');startListening();}}
+        else if(d.type==='onMute'&&d.value===true&&unmutes<3){unmutes++;send('unMute');}
+        else if(d.type==='onStateChange'&&Number(d.value)===1)startListening();
+        else if(d.type==='onStateChange'&&Number(d.value)===0)finish('ENDED');
+        else if(d.type==='onCurrentTime'){
+          const t=Number(v.currentTime),dur=Number(v.duration);if(!isFinite(t))return;
+          timeEvents=true;lastTick=Date.now();now=t;startListening();
+          if(!times&&dur>0){limit=Math.min(dur,auto.cap);times=C.shotTimes(limit);}
+          while(times&&times.length&&t>=times[0]){times.shift();shoot();}
+          autoSay(`Listening and looking · ${Math.floor(t)}s of ${Math.ceil(limit)}s`);
+          if(t>=limit-0.25)finish('LIMIT');
+        }
+        else if(d.type==='onPlayerError'||d.type==='onError'){
+          const code=Number(v.errorCode??d.value);
+          if(code===3002&&!triedPlay){triedPlay=true;send('play');return;}
+          finish(code===1001?'NOT_FOUND':code===3002?'AUTOPLAY':'PLAYBACK');
+        }
+      };
+      window.addEventListener('message',onMessage);
+      autoSay('Loading the clip…');
+      // Photo posts and quiet players may not report the time: fall back to the clock.
+      const timer=setInterval(()=>{
+        const t=Date.now();
+        if(!ready&&t-started>20000)return finish('NO_PLAYER');
+        if(ready&&!timeEvents){
+          const s=(t-ready)/1000;
+          if(s>=2&&shots.length<1)shoot();if(s>=6&&shots.length<2)shoot();if(s>=10&&shots.length<3)shoot();
+          if(s>=Math.min(12,auto.cap))finish('NO_TIME');
+        }
+        if(timeEvents&&t-lastTick>15000)finish(shots.length?'STALLED_PART':'STALLED');
+        if(t-started>(auto.cap+40)*1000)finish('TIMEOUT');
+      },500);
+    });
+  }
+  async function autoClip(r){
+    const played=await autoPlay(r);
+    if(played.reason==='SHARING_STOPPED')return {reason:'SHARING_STOPPED'};
+    if(played.reason==='STOPPED_BY_PERSON')return {reason:'STOPPED'};
+    if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
+      return {status:'unavailable',reason:played.reason==='STALLED'?'STALLED':played.reason};
+    const audio=autoAudio(),image=autoGrid(played.shots);
+    if(!audio&&!image)return {status:'empty',reason:'NOTHING_TO_READ'};
+    autoSay('Working out what it is about…');
+    let res,data;
+    try{
+      res=await fetch('/api/understand',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+        body:JSON.stringify({audio,image,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))})});
+      data=await res.json().catch(()=>({}));
+    }catch(_){return {status:'failed',reason:'NETWORK'};}
+    if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
+    if(res.status===429)return {stopRun:true,message:data.error||"Today's auto-review allowance is used up. Continue tomorrow."};
+    if(res.status===503)return {stopRun:true,message:'Auto-review is not set up on the server yet (it needs the AI binding; see the README).'};
+    if(!data.status)return {status:'failed',reason:'SERVER_'+res.status};
+    return data;
+  }
+  function stopAuto(){if(auto){auto.stop=true;autoSay('Stopping…');auto.finishClip?.('STOPPED_BY_PERSON');}}
+  function initAuto(){
+    const dlg=$('#autoDialog');
+    $('#startAuto').addEventListener('click',openAuto);
+    $('#autoStart').addEventListener('click',startAuto);
+    $('#autoStop').addEventListener('click',stopAuto);
+    for(const id of ['autoScope','autoCap'])$('#'+id).addEventListener('change',autoEstimate);
+    $('#autoRedo').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
+    const close=()=>{if(auto&&!confirm('Stop auto-review and close?'))return;stopAuto();if(!auto)dlg.close();else{const wait=setInterval(()=>{if(!auto){clearInterval(wait);dlg.close();}},200);}};
+    $('#autoClose').addEventListener('click',close);
+    dlg.addEventListener('cancel',e=>{e.preventDefault();close();});
+  }
   /* ---- Settings: categories with sort words, optional tabs, starter sets ---- */
   function renderSettings(){
     const counts={};for(const r of state.records)counts[r.category]=(counts[r.category]||0)+1;
@@ -583,6 +819,7 @@
     });
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
     initReview();
+    initAuto();
     $('#analyzeLinks').addEventListener('click',analyzeLinks);
     $('#viewEnriched').addEventListener('click',viewEnriched);
     $('#settingsPage').addEventListener('change',settingsChange);

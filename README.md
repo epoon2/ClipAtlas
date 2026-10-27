@@ -36,7 +36,8 @@ For development, run `npm run db:local` followed by `npm run dev` and test at th
 
 ## Test
 
-- `npm test` runs every automated test: the import and itinerary rules in `public/core.js` (the real file, loaded by `tests/load-core.cjs`), the TikTok link reader and lookup in `src/tiktok.js` (with TikTok faked), and `/api/enrich` through the real Worker (with D1 faked).
+- `npm test` runs every automated test: the import and itinerary rules in `public/core.js` (the real file, loaded by `tests/load-core.cjs`), the TikTok link reader and lookup in `src/tiktok.js` (with TikTok faked), auto-review in `src/understand.js` (with Workers AI faked), and `/api/enrich` and `/api/understand` through the real Worker (with D1 faked).
+- `xvfb-run -a node tests/autoreview.mjs` runs auto-review end to end in a headed Chromium: the page shares its own tab, a stand-in TikTok player makes a sound and shows text, and a fake Workers AI checks that it got a 16 kHz WAV with sound and screenshots that show the player.
 - `node tests/browser.mjs` runs the whole site in Chromium against an in-memory stand-in for D1 and a fake TikTok: sign up, paste links, look up, Review mode (TikTok's player replaced by a stub page, with a check that the CSP lets it load), settings, reload. It needs Playwright (`npm i -D playwright && npx playwright install chromium`), so it is not part of `npm test`.
 
 ## Static website vs hosted accounts
@@ -59,6 +60,24 @@ Each account has its own categories (Settings). A category has a name, an emoji 
 **Tabs:** the Itinerary can be turned off in Settings (planned stops are kept). A research board and a checklist are planned as more tab types.
 
 Stored in the library as `categories: [{id, name, emoji, words}]` and `settings: {purpose, tabs: {itinerary}}`; clips refer to a category by name.
+
+## Auto-review
+
+**✦ Auto-review clips** on the Discoveries page fills clips in by itself. TikTok's export has only links and dates, and TikTok's lookup no longer gives captions, so ClipAtlas finds out what a clip is about the way a person would: it plays it.
+
+1. Press **Start**. The browser asks to share the tab: keep **This tab** and turn on **Also share tab audio** (Chrome or Edge on a computer).
+2. Each clip plays in TikTok's official embedded player inside the dialog, silently (the shared sound is not played on the speakers). The page records the tab's sound for up to 30, 45 or 60 seconds per clip and takes up to three screenshots of the player, which shows the caption and the text on the video.
+3. `/api/understand` (`src/understand.js`) sends the sound to Whisper (`@cf/openai/whisper-large-v3-turbo`) for a transcript, then the screenshots, the transcript and the account's categories (with their sort words) to a vision model (`@cf/meta/llama-3.2-11b-vision-instruct`). Its answer is checked: the category must be one of the account's (else Unsorted), every field has a length limit, and the model is told to fill in places only when they were said or shown (it can still be wrong, which is what the badge is for).
+4. The clip gets its title, category (only if it was Unsorted), place, city, country (only where empty), tags, and the text on the video as its caption (if empty). The transcript, that text and a one-line summary are kept and searchable. Notes and anything the person wrote are never replaced.
+5. With **Mark them reviewed** (on by default) the clip counts as reviewed and gets an **✦ Auto-reviewed** badge. The status filter **Auto-reviewed (check these)** lists them; saving one in Review mode removes the badge.
+
+Clips are tried once: a clip that would not play (private or removed) or where nothing was heard or seen is not tried again unless **Also redo** is ticked; failed ones are tried again. Short links (`vm.tiktok.com`) have no video number and cannot play in the embedded player.
+
+**Cost and limits.** Workers AI runs on the Cloudflare account the site is deployed on. About $0.0008 of AI per clip, so the free daily allowance (10,000 neurons) covers roughly 100 to 150 clips a day; when it is used up, the run stops with a message and continues the next day. `AUTO_REVIEW_DAILY_LIMIT` (wrangler.toml, default 300) caps clips per account per day. Each clip plays in real time, so 200 clips at 45 seconds take about 2.5 hours; the tab must stay open and on screen.
+
+**Setup.** `wrangler.toml` has `[ai] binding = "AI"`; deploying is enough. The first vision request accepts Meta's license for the account automatically (Workers AI asks for a one-time "agree").
+
+**Privacy.** The sound and screenshots are sent to Cloudflare Workers AI for that one request and not stored by ClipAtlas. Nothing is downloaded from TikTok.
 
 ## Review mode
 
