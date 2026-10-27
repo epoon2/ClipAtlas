@@ -36,14 +36,33 @@ For development, run `npm run db:local` followed by `npm run dev` and test at th
 
 ## Test
 
-`npm test` runs the original import/de-duplication/itinerary core tests. Cloud authentication and D1 integration need to be manually smoke-tested after `wrangler dev` because the test suite does not yet emulate D1 or the Cloudflare runtime.
+- `npm test` runs every automated test: the import and itinerary rules in `public/core.js` (the real file, loaded by `tests/load-core.cjs`), the TikTok link reader and lookup in `src/tiktok.js` (with TikTok faked), and `/api/enrich` through the real Worker (with D1 faked).
+- `node tests/browser.mjs` runs the whole site in Chromium against an in-memory stand-in for D1 and a fake TikTok: sign up, paste links, analyze, filter, reload. It needs Playwright (`npm i -D playwright && npx playwright install chromium`), so it is not part of `npm test`.
 
 ## Static website vs hosted accounts
 
 GitHub Pages is suitable for a personal browser-only app, but accounts cannot safely be created with only static HTML. This version uses Cloudflare Workers for API endpoints and Cloudflare D1 for server-side account records, so users can sign up and open their own private library from different devices.
 
-## Automatic metadata enrichment (new)
+## Automatic metadata enrichment
 
-After signing in and importing TikTok links, choose **Analyze unreviewed links** on the Discoveries page. The authenticated Cloudflare Worker requests TikTok's official public `oEmbed` endpoint for each HTTPS TikTok URL. A conservative keyword classifier infers category, city, country and hashtags **only from returned title/caption text**. It also fills creator and title when available. It does not fabricate venue names, descriptions, prices, addresses, audio transcripts, or on-screen text. Existing nonblank fields and Reviewed status are preserved.
+After signing in and importing TikTok links, choose **Analyze unreviewed links** on the Discoveries page. It looks up the next **40** links that need it, one at a time, and saves after each one; click again for the next batch. **View filled-in clips** jumps to the ones that got details, and the **analysis** filter shows any group.
 
-Unreachable, private, deleted, unresolvable short links and TikTok request failures remain unverified and need manual review. API is rate limited (180 metadata requests per signed-in account per hour) and processes one request at a time. Export a backup before large imports. No external AI provider or TikTok API key is required. Deploy this updated Worker and static assets using `npm run deploy`.
+How a link is looked up (`src/tiktok.js`):
+
+1. **Cleaned and read.** Invisible characters (zero-width spaces, non-breaking spaces), wrapping `<>` or quotes, trailing punctuation and tracking parameters are removed. Accepted: `/@creator/video/ID`, the export's share links `/share/video/ID` on `tiktok.com` **and `tiktokv.com`**, `/video/ID`, `/v/ID.html`, `/embed/v2/ID`, photo posts, and `vm.`/`vt.tiktok.com` and `/t/` short links. `http://` is upgraded to `https://`.
+2. **Full address.** A share or short link has no creator handle, so the Worker asks TikTok where it leads (plain requests, at most 3 redirects, TikTok hosts only) and uses the address with the handle. The handle is never made up.
+3. **oEmbed.** TikTok's documented oEmbed endpoint is asked about that address (or the share link, if TikTok did not redirect). A rate limit (429) stops the batch at once.
+
+Every clip keeps what happened (`enrichment: {status, reason, retryable, at}`), shown as a badge:
+
+| Badge | Status | Reasons | Looked up again |
+|---|---|---|---|
+| Filled in | `enriched` | TikTok returned a title or creator | no |
+| No useful details | `empty` | `EMPTY_METADATA`: TikTok answered with no title and no creator | after a week |
+| Not public or removed | `unavailable` | `NOT_PUBLIC` | after a week |
+| Lookup failed | `failed` | `RATE_LIMITED`, `TIMEOUT`, `TIKTOK_ERROR`, `BAD_RESPONSE` | next run |
+| Link not accepted | `rejected` | `NOT_TIKTOK_LINK`, `NO_VIDEO_IN_LINK`, `INVALID_URL`, `LINK_TOO_LONG`, `LINK_HAS_LOGIN` | next run |
+
+Only `enriched` counts as filled in; the first version also counted empty answers. Clips analyzed by that version are sorted into these groups automatically, and its empty "successes" are looked up again. When TikTok gives the full address, the clip's link is updated to it (the original stays in `originalUrl`).
+
+A conservative keyword classifier suggests category, city, country and hashtags **only from the returned title**. It does not invent venue names, prices, addresses, transcripts or on-screen text. Existing non-blank fields and Reviewed clips are kept. The Worker allows 180 lookups per account per hour.

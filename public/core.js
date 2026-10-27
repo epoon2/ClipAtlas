@@ -17,24 +17,72 @@
   const uniq = values => [...new Set(values.filter(Boolean))];
   const normalizeField = value => safeString(value).toLowerCase().replace(/[^a-z0-9]/g, '');
 
+  // Invisible characters and wrappers that ride along with copied links.
+  const INVISIBLE = /[\u00a0\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\ufeff]/g;
+  const INVISIBLE_ENCODED = /%C2%A0|%E2%80%(?:8[B-F]|A[8-E])|%E2%81%A[0-4]|%EF%BB%BF/gi;
+  function cleanLink(input) {
+    let s = safeString(input).replace(INVISIBLE, '').replace(INVISIBLE_ENCODED, '').trim();
+    return s.replace(/^[<"'(\[]+/, '').replace(/[>"')\].,;:!?]+$/, '').trim();
+  }
+  // /@creator/video/ID, /share/video/ID (TikTok's export), /video/ID, /v/ID.html,
+  // /embed/v2/ID, and the same for /photo/ posts.
+  const VIDEO_PATHS = [
+    /^\/@[\w.-]{1,64}\/(?:video|photo)\/(\d{8,25})\/?$/i,
+    /^\/(?:share\/)?(?:video|photo)\/(\d{8,25})\/?$/i,
+    /^\/v\/(\d{8,25})(?:\.html)?\/?$/i,
+    /^\/embed(?:\/v2)?\/(\d{8,25})\/?$/i
+  ];
   function parseTikTokURL(input) {
-    const raw = safeString(input);
+    const raw = cleanLink(input);
     if (!raw) return null;
     let u;
-    try { u = new URL(raw.startsWith('https://') || raw.startsWith('http://') ? raw : 'https://' + raw); }
+    try { u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : 'https://' + raw); }
     catch (_) { return null; }
-    if (!['http:', 'https:'].includes(u.protocol) || !HOSTS.has(u.hostname.toLowerCase())) return null;
-    const match = u.pathname.match(/(?:^|\/)(?:video|v)\/(\d{10,25})(?:\/|$)/i);
-    if (match) {
-      return { url: 'https://' + u.hostname.toLowerCase() + (u.pathname.replace(/\/+$/, '') || '/'), key: 'tiktok:' + match[1], videoId: match[1], originalUrl: raw };
+    if (!['http:', 'https:'].includes(u.protocol) || !HOSTS.has(u.hostname.toLowerCase()) || u.username || u.password || u.port) return null;
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.replace(/\/{2,}/g, '/');
+    for (const re of VIDEO_PATHS) {
+      const match = path.match(re);
+      if (match) return { url: 'https://' + host + (path.replace(/\/+$/, '') || '/'), key: 'tiktok:' + match[1], videoId: match[1], originalUrl: raw };
     }
     // Short links cannot be linked to their long video IDs without resolving redirects.
     // Preserve the short path; never guess a matching video or make a network request.
-    const path = u.pathname.replace(/\/+$/, '') || '/';
-    const host = u.hostname.toLowerCase();
-    const normalized = 'https://' + host + path;
-    if (path === '/') return null;
+    const short = path.replace(/\/+$/, '') || '/';
+    const normalized = 'https://' + host + short;
+    if (short === '/') return null;
     return { url: normalized, key: 'link:' + normalized.toLowerCase(), videoId: '', originalUrl: raw };
+  }
+  // What the last metadata lookup found, in one word. Older records only have
+  // enrichmentStatus ('metadata' was also set when TikTok returned nothing).
+  const ANALYSIS_LABELS = {
+    enriched: 'Filled in', empty: 'No useful details', unavailable: 'Not public or removed',
+    failed: 'Lookup failed (will retry)', rejected: 'Link not accepted', not_analyzed: 'Not analyzed yet'
+  };
+  function analysisState(r) {
+    const status = r && r.enrichment && r.enrichment.status;
+    if (status && ANALYSIS_LABELS[status]) return status;
+    if (r && r.enrichmentStatus === 'metadata') return (r.title || r.creator) ? 'enriched' : 'empty';
+    if (r && r.enrichmentStatus === 'unavailable') return 'unavailable';
+    return 'not_analyzed';
+  }
+  // Worth looking up (again)? Never-analyzed links, failures, refused links (the
+  // rules may have changed) and old empty results; "not public" and "no useful
+  // details" are tried again only after a week.
+  function needsAnalysis(r, now = Date.now()) {
+    if (!r || r.status === 'reviewed' || !r.url) return false;
+    const state = analysisState(r);
+    if (state === 'enriched') return false;
+    if (state === 'unavailable' || state === 'empty') {
+      const at = Date.parse((r.enrichment && r.enrichment.at) || r.enrichedAt || '');
+      const legacyEmpty = !r.enrichment && state === 'empty';
+      return legacyEmpty || !(at > now - 7 * 86400000);
+    }
+    return true;
+  }
+  function cleanEnrichment(e) {
+    if (!e || typeof e !== 'object' || !ANALYSIS_LABELS[e.status] || e.status === 'not_analyzed') return undefined;
+    return { status: e.status, reason: safeString(e.reason).slice(0, 40), retryable: !!e.retryable,
+      at: safeString(e.at).slice(0, 40) };
   }
   function parseCSV(text) {
     text = String(text).replace(/^\uFEFF/, '');
@@ -111,6 +159,9 @@
       city: safeString(getter('city')), country: safeString(getter('country')),
       savedAt: toDate(getter('savedAt', 'Date', 'saveddate')),
       status: safeString(getter('status')) === 'reviewed' ? 'reviewed' : 'unreviewed',
+      enrichment: cleanEnrichment(source.enrichment),
+      enrichmentStatus: ['metadata', 'unavailable'].includes(source.enrichmentStatus) ? source.enrichmentStatus : undefined,
+      enrichedAt: safeString(source.enrichedAt) || undefined,
       createdAt: safeString(source.createdAt) || isoNow(), updatedAt: isoNow()
     };
   }
@@ -200,5 +251,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { CATEGORIES, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, inferCategory, planMarkdown };
+  return { CATEGORIES, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, inferCategory, planMarkdown };
 });

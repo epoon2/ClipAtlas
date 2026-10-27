@@ -103,10 +103,11 @@
   function renderLibrary() {
     renderStats(); renderCollections();
     const q=$('#search').value.toLocaleLowerCase().trim();
-    const category=$('#categoryFilter').value, status=$('#statusFilter').value;
+    const category=$('#categoryFilter').value, status=$('#statusFilter').value, analysis=$('#analysisFilter').value;
     let records=state.records.filter(r=>(!activeCollection || (r.collections||[]).includes(activeCollection))
       && (category==='all'||r.category===category)
       && (status==='all'||r.status===status)
+      && (analysis==='all'||C.analysisState(r)===analysis)
       && (!q || [r.title,r.url,r.creator,r.caption,r.notes,r.category,r.place,r.city,r.country,(r.collections||[]).join(' '),(r.tags||[]).join(' ')].join(' ').toLocaleLowerCase().includes(q)));
     const sort=$('#sortFilter').value;
     records.sort((a,b) => sort==='title'?(a.title||a.place||'').localeCompare(b.title||b.place||''):
@@ -118,7 +119,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${symbols[r.category]||'✦'}</span><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div><h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button><button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button><button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${symbols[r.category]||'✦'}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div><h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button><button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button><button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -138,7 +139,7 @@
     }
     days.innerHTML=s;
   }
-  function render() { renderStats(); renderCollections(); if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); }
+  function render() { renderStats(); renderCollections(); renderAnalysisSummary(); if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); }
   function openEditor(id=null) {
     editingId=id; const r=state.records.find(x=>x.id===id);
     $('#modalTitle').textContent=r?'Edit discovery':'New discovery'; $('#modalError').textContent='';
@@ -160,6 +161,7 @@
     const old=state.records.find(r=>r.id===editingId);
     const created=C.createRecord({...source,id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt});
     if(!created){$('#modalError').textContent='Invalid TikTok URL.';return;}
+    if(old&&old.key===created.key){created.enrichment=old.enrichment;created.enrichedAt=old.enrichedAt;created.enrichmentStatus=old.enrichmentStatus;}
     if(old)state.records[state.records.indexOf(old)]={...created,id:old.id};else state.records.push(created);
     $('#editDialog').close();commit();toast(old?'Discovery updated':'New discovery saved');
   }
@@ -225,12 +227,12 @@
   }
   // Conservative suggestions from caption text only. Never invent a place or price.
   const RULES = [
-    ['Taiwan Food',/taiwan.*(food|eat|restaurant|night market)|taipei.*(food|eat|restaurant|cafe)|夜市|小吃|美食|餐廳|餐厅|吃什麼|吃什么|珍珠奶茶|bubble tea/i],
-    ['Taiwan Shopping',/taiwan.*(shopping|shop|buy|store)|taipei.*(shopping|shop|store)|逛街|購物|购物|伴手禮|伴手礼/i],
-    ['Taiwan Activities',/taiwan.*(things to do|attractions|itinerary|explore)|taipei.*(things to do|attractions)|九份|十分|景點|景点/i],
-    ['Date Ideas',/date night|date idea|romantic|couples|約會|约会/i],
-    ['Credit Card Points',/points transfer|transfer partner|credit card points|miles redemption|amex points|chase points|capital one miles/i],
-    ['Travel',/travel|vacation|hotel|flight|itinerary|trip|旅遊|旅游/i]
+    ['Taiwan · Food',/taiwan.*(food|eat|restaurant|night market)|taipei.*(food|eat|restaurant|cafe)|夜市|小吃|美食|餐廳|餐厅|吃什麼|吃什么|珍珠奶茶|bubble tea/i],
+    ['Taiwan · Shopping',/taiwan.*(shopping|shop|buy|store)|taipei.*(shopping|shop|store)|逛街|購物|购物|伴手禮|伴手礼/i],
+    ['Taiwan · Activities',/taiwan.*(things to do|attractions|itinerary|explore)|taipei.*(things to do|attractions)|九份|十分|景點|景点/i],
+    ['Dates & restaurants',/date night|date idea|romantic|couples|約會|约会/i],
+    ['Points & miles',/points transfer|transfer partner|credit card points|miles redemption|amex points|chase points|capital one miles/i],
+    ['Travel ideas',/travel|vacation|hotel|flight|itinerary|trip|旅遊|旅游/i]
   ];
   function suggestMetadata(title){
     const text=String(title||'');const lower=text.toLowerCase();
@@ -240,44 +242,82 @@
     const tags=[...new Set((text.match(/#[\p{L}\p{N}_]+/gu)||[]).map(h=>h.slice(1)))].slice(0,12);
     return {category,city,country,tags};
   }
+  // Looks up the next batch of links that need it (C.needsAnalysis), one at a
+  // time, saving after each. Each clip keeps what happened in r.enrichment
+  // ({status, reason, retryable, at}); only real titles or creators count as
+  // filled in. Stops on a rate limit or an expired sign-in.
+  const BATCH=40, PAUSE_MS=700;
+  const REASON_WORDS={NOT_TIKTOK_LINK:'not a TikTok link',NO_VIDEO_IN_LINK:'not a video link',INVALID_URL:'not a link',
+    LINK_TOO_LONG:'link too long',LINK_HAS_LOGIN:'link has a login',EMPTY_METADATA:'no title or creator',
+    NOT_PUBLIC:'private or removed',RATE_LIMITED:'TikTok limit',TIMEOUT:'timed out',TIKTOK_ERROR:'TikTok error',
+    BAD_RESPONSE:'unexpected answer',NETWORK:'connection problem'};
   let stopAnalysis=false, analysisRunning=false;
+  const tallyText=t=>`${t.enriched||0} filled in · ${t.empty||0} no details · ${t.unavailable||0} not public · ${t.rejected||0} not accepted · ${t.failed||0} failed`;
+  function renderAnalysisSummary(){
+    const counts={};for(const r of state.records){const k=C.analysisState(r);counts[k]=(counts[k]||0)+1;}
+    const btn=$('#viewEnriched');if(btn){btn.textContent=`View filled-in clips (${counts.enriched||0})`;btn.disabled=!counts.enriched;}
+    const waiting=state.records.filter(r=>C.needsAnalysis(r)).length;
+    const note=$('#analysisWaiting');if(note)note.textContent=waiting?`${waiting} link${waiting===1?'':'s'} waiting to be looked up (${BATCH} per click).`:'Every unreviewed link has been looked up.';
+  }
+  function applyLookup(r,data){
+    const at=new Date().toISOString();
+    r.enrichment={status:data.status,reason:String(data.reason||'').slice(0,40),retryable:!!data.retryable,at};
+    delete r.enrichmentStatus;r.enrichedAt=at;
+    if(data.status!=='enriched')return;
+    const title=String(data.title||''); const suggestion=suggestMetadata(title);
+    if(!r.title&&title)r.title=title;
+    if(!r.caption&&title)r.caption=title;
+    if(!r.creator&&data.creator)r.creator=String(data.creator);
+    if((!r.category||['Unsorted','Other','Uncategorized'].includes(r.category))&&suggestion.category)r.category=suggestion.category;
+    if(!r.city&&suggestion.city)r.city=suggestion.city;
+    if(!r.country&&suggestion.country)r.country=suggestion.country;
+    r.tags=[...new Set([...(r.tags||[]),...suggestion.tags])].slice(0,20);
+    // TikTok told us the full address (with the creator): use it for the link.
+    const full=data.canonicalUrl?C.parseTikTokURL(data.canonicalUrl):null;
+    if(full){
+      if(full.key===r.key)r.url=full.url;
+      else if(!r.videoId&&!state.records.some(o=>o!==r&&o.key===full.key)){r.key=full.key;r.videoId=full.videoId;r.url=full.url;}
+    }
+  }
   async function analyzeLinks(){
     if(analysisRunning)return;
     if(saveBlocked){toast('Resolve the save conflict first.');return;}
     if(saveBusy||dirty||saveTimer){await persist();if(saveBlocked)return;}
-    const records=state.records.filter(r=>r.status!=='reviewed'&&r.url&&(!r.enrichedAt||r.enrichmentStatus==='unavailable'));
-    if(!records.length){$('#analyzeProgress').textContent='No unreviewed links awaiting analysis.';return;}
+    const records=state.records.filter(r=>C.needsAnalysis(r)).slice(0,BATCH);
+    if(!records.length){$('#analyzeProgress').textContent='Nothing waiting: every unreviewed link has been looked up recently.';return;}
     analysisRunning=true;stopAnalysis=false;$('#analyzeLinks').disabled=true;$('#cancelAnalyze').hidden=false;
-    let enriched=0,unavailable=0,failed=0;
+    const tally={},reasons={};let stopReason='';
     try{
       for(let i=0;i<records.length;i++){
         if(stopAnalysis||saveBlocked)break;
-        const r=records[i];$('#analyzeProgress').textContent=`Processing ${i+1}/${records.length} · ${enriched} filled · ${unavailable} unavailable · ${failed} errors`;
+        const r=records[i];
+        $('#analyzeProgress').textContent=`Looking up ${i+1} of ${records.length} · ${tallyText(tally)}`;
+        let data;
         try{
-          const res=await fetch('/api/enrich',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:r.url}),credentials:'same-origin'});
-          const data=await res.json();if(!res.ok)throw new Error(data.error||'Lookup failed');
-          r.enrichmentStatus=data.available?'metadata':'unavailable';
-          r.enrichedAt=new Date().toISOString();
-          if(data.available){
-            const title=data.title||''; const suggestion=suggestMetadata(title);
-            if(!r.title&&title)r.title=title;
-            if(!r.caption&&title)r.caption=title;
-            if(!r.creator&&data.creator)r.creator=data.creator;
-            if((!r.category||r.category==='Other'||r.category==='Uncategorized')&&suggestion.category)r.category=suggestion.category;
-            if(!r.city&&suggestion.city)r.city=suggestion.city;
-            if(!r.country&&suggestion.country)r.country=suggestion.country;
-            r.tags=[...new Set([...(r.tags||[]),...suggestion.tags])].slice(0,20);
-            enriched++;
-          } else unavailable++;
-          commit();await persist();
-        }catch(err){failed++;if(/limit reached|sign in/i.test(err.message)){toast(err.message);break;}}
-        if(i<records.length-1)await new Promise(resolve=>setTimeout(resolve,350));
+          const res=await fetch('/api/enrich',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:r.originalUrl||r.url}),credentials:'same-origin'});
+          data=await res.json().catch(()=>({}));
+          if(res.status===401){stopReason='Your sign-in expired: sign in again, then continue.';break;}
+          if(res.status===429){stopReason=(data.error||'Lookup limit reached; try again in an hour.')+' ';break;}
+          if(!data.status)data={status:'failed',reason:'SERVER_'+res.status,retryable:true};
+        }catch(_){data={status:'failed',reason:'NETWORK',retryable:true};}
+        applyLookup(r,data);
+        tally[data.status]=(tally[data.status]||0)+1;
+        if(data.status!=='enriched')reasons[data.reason]=(reasons[data.reason]||0)+1;
+        commit();await persist();
+        if(data.reason==='RATE_LIMITED'){stopReason='TikTok is limiting lookups: wait a while, then continue. ';break;}
+        if(i<records.length-1)await new Promise(resolve=>setTimeout(resolve,PAUSE_MS));
       }
     }finally{
       analysisRunning=false;$('#analyzeLinks').disabled=false;$('#cancelAnalyze').hidden=true;
-      $('#analyzeProgress').textContent=`Finished: ${enriched} enriched, ${unavailable} unavailable, ${failed} errors. Check suggested categories before marking Reviewed.`;
+      const why=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${REASON_WORDS[k]||k} ${n}`).join(', ');
+      const left=state.records.filter(r=>C.needsAnalysis(r)).length;
+      $('#analyzeProgress').textContent=`${stopReason}Done: ${tallyText(tally)}.${why?' Why: '+why+'.':''}${left?` ${left} still waiting; click Analyze again for the next batch.`:''} Check suggested categories before marking Reviewed.`;
       render();
     }
+  }
+  function viewEnriched(){
+    activeCollection='';$('#search').value='';$('#categoryFilter').value='all';$('#statusFilter').value='all';
+    $('#analysisFilter').value='enriched';selectTab('library');
   }
   function init() {
     for(const c of C.CATEGORIES){$('#categoryFilter').insertAdjacentHTML('beforeend',`<option value="${html(c)}">${html(c)}</option>`);$('#formCategory').insertAdjacentHTML('beforeend',`<option value="${html(c)}">${html(c)}</option>`);}
@@ -298,13 +338,15 @@
     });
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
     $('#analyzeLinks').addEventListener('click',analyzeLinks);
+    $('#viewEnriched').addEventListener('click',viewEnriched);
     $('#cancelAnalyze').addEventListener('click',()=>{stopAnalysis=true;});
     $('#newCollection').addEventListener('click',addCollection);
     $('#editForm').addEventListener('submit',editorSave);
     $('#closeDialog').addEventListener('click',()=>$('#editDialog').close());
     $('#cancelEdit').addEventListener('click',()=>$('#editDialog').close());
     $('#search').addEventListener('input',renderLibrary);
-    for(const id of ['categoryFilter','statusFilter','sortFilter'])$('#'+id).addEventListener('change',renderLibrary);
+    for(const id of ['categoryFilter','statusFilter','analysisFilter','sortFilter'])$('#'+id).addEventListener('change',renderLibrary);
+    for(const [value,label] of Object.entries(C.ANALYSIS_LABELS))$('#analysisFilter').insertAdjacentHTML('beforeend',`<option value="${html(value)}">${html(label)}</option>`);
     $('#tripTitle').addEventListener('change',evt=>{state.tripTitle=evt.target.value.trim().slice(0,140);commit();});
     $('#dayCount').addEventListener('change',evt=>{
       const next=Number(evt.target.value);
