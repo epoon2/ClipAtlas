@@ -32,12 +32,12 @@ For development, run `npm run db:local` followed by `npm run dev` and test at th
 - D1 library uploads are limited to 2 MB and contain curated records, not the entire TikTok account export. Each user has an isolated `user_id`-keyed record.
 - If a save conflicts with a different tab or device, the app stops cloud saves and urges you to download a JSON backup before reloading. It does not silently overwrite the other user's changes.
 - To import data from the old local-only ClipAtlas: open the hosted site **using the same browser/profile and same origin only if storage permits** and click **Import this browser’s old local library**. A separate origin usually cannot access the original file:// or other website storage; export JSON on the old app and import it into the hosted app instead.
-- An encrypted backup/export system, email verification/reset, per-field collaborative merging, automated video metadata enrichment, itinerary maps, and bulk export processing are future features.
+- An encrypted backup/export system, email verification/reset, per-field collaborative merging, itinerary maps, and bulk export processing are future features.
 
 ## Test
 
 - `npm test` runs every automated test: the import and itinerary rules in `public/core.js` (the real file, loaded by `tests/load-core.cjs`), the TikTok link reader and lookup in `src/tiktok.js` (with TikTok faked), and `/api/enrich` through the real Worker (with D1 faked).
-- `node tests/browser.mjs` runs the whole site in Chromium against an in-memory stand-in for D1 and a fake TikTok: sign up, paste links, analyze, filter, reload. It needs Playwright (`npm i -D playwright && npx playwright install chromium`), so it is not part of `npm test`.
+- `node tests/browser.mjs` runs the whole site in Chromium against an in-memory stand-in for D1 and a fake TikTok: sign up, paste links, look up, Review mode (TikTok's player replaced by a stub page, with a check that the CSP lets it load), settings, reload. It needs Playwright (`npm i -D playwright && npx playwright install chromium`), so it is not part of `npm test`.
 
 ## Static website vs hosted accounts
 
@@ -60,9 +60,19 @@ Each account has its own categories (Settings). A category has a name, an emoji 
 
 Stored in the library as `categories: [{id, name, emoji, words}]` and `settings: {purpose, tabs: {itinerary}}`; clips refer to a category by name.
 
-## Automatic metadata enrichment
+## Review mode
 
-After signing in and importing TikTok links, choose **Analyze unreviewed links** on the Discoveries page. It looks up the next **40** links that need it, one at a time, and saves after each one; click again for the next batch. **View filled-in clips** jumps to the ones that got details, and the **analysis** filter shows any group.
+The main way to fill in clips. **▶ Review clips** on the Discoveries page (or **▶ Watch** on any card) opens each clip in TikTok's official embedded player (`https://www.tiktok.com/player/v1/<video id>`) beside a short form: title, category, place, city, country, tags, collections, notes and caption.
+
+- **Which clips:** Needs review (default), Unsorted, All clips, any collection, or, from **Watch**, the clips on screen with the current filters, starting at that card. Newest saved first.
+- **Category suggestions:** as you type, the categories' sort words suggest a category. For a clip that was Unsorted the suggestion is picked for you until you choose one yourself, and the card later shows "Sorted by: …". For any other clip it is offered with a **Use it** button.
+- **Keys:** Enter saves and goes to the next clip (Ctrl/⌘+Enter also works inside the notes boxes), Ctrl/⌘+→ skips, Ctrl/⌘+← goes back, Esc closes. Leaving a clip with unsaved changes asks first. "Mark as reviewed when I save" is on by default.
+- **Nothing is looked up.** The video plays in the viewer's own browser straight from TikTok, so there is no rate limit and nothing goes through the Worker. Private or removed videos show TikTok's own message in the player. Short links (`vm.tiktok.com/…`) have no video number, so they show a note and an **Open on TikTok** link instead.
+- The page's Content Security Policy allows frames only from `https://www.tiktok.com`.
+
+## Automatic lookup (optional)
+
+Under **Automatic lookup (optional)** on the Discoveries page, choose **Look up unreviewed links**. As of October 2026 TikTok's oEmbed answers most lookups with no title or creator and rate-limits the Worker, so this usually finds little; Review mode is the dependable way. It looks up the next **40** links that need it, one at a time, and saves after each one; click again for the next batch. **View filled-in clips** jumps to the ones that got details, and the **analysis** filter shows any group.
 
 How a link is looked up (`src/tiktok.js`):
 

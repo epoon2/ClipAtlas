@@ -2,7 +2,8 @@
 // in-memory stand-in for D1 and a fake TikTok. Run by hand (needs Playwright):
 //   node tests/browser.mjs
 // Checks: sign up, paste TikTok-export share links, analyze, the counts, the
-// "View filled-in clips" button, the badges, and that it all survives a reload.
+// "View filled-in clips" button, the badges, Review mode (with a stand-in for
+// TikTok's player), and that it all survives a reload.
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
@@ -88,6 +89,15 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
 
+// TikTok's player is replaced by a stub page; the site's own CSP must let it load.
+const playerLoads = [];
+const stubTikTok = async target => target.route('https://www.tiktok.com/**', route => {
+  playerLoads.push(route.request().url());
+  return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>stub</title><p id="stub">stub player</p>' });
+});
+const watchCsp = target => target.addInitScript(() => { window.__csp = [];
+  document.addEventListener('securitypolicyviolation', e => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI)); });
+await stubTikTok(page); await watchCsp(page);
 await page.goto(base);
 await page.click('#authToggle');
 await page.fill('#authDisplay', 'Tester');
@@ -114,6 +124,7 @@ await page.click('[data-tab="library"]');
 check('four links imported', (await page.textContent('#statClips')).trim() === '4');
 check('the panel says what is waiting', /4 links waiting/.test(await page.textContent('#analysisWaiting')));
 
+await page.click('.lookup-extra summary');
 await page.click('#analyzeLinks');
 await page.waitForFunction(() => /Done:/.test(document.getElementById('analyzeProgress').textContent), null, { timeout: 20000 });
 const progress = await page.textContent('#analyzeProgress');
@@ -144,6 +155,60 @@ await page.waitForSelector('#appShell:not([hidden])');
 await page.selectOption('#analysisFilter', 'enriched');
 check('results survive a reload', (await page.$$('#clipGrid .clip-card')).length === 2);
 check('nothing is waiting right after the run', /Every unreviewed link has been looked up/.test(await page.textContent('#analysisWaiting')));
+
+// ---- Review mode
+check('the review panel counts what needs review', /4 clips need review/.test(await page.textContent('#reviewCount')));
+await page.click('#startReview');
+await page.waitForSelector('#reviewDialog[open]');
+check('Review opens on the clips that need review', (await page.textContent('#reviewTotal')) === '4');
+const frameSrc = () => page.$eval('#reviewFrame iframe', f => f.src).catch(() => '');
+check('the clip plays in TikTok\'s own player', /^https:\/\/www\.tiktok\.com\/player\/v1\/7000000000000000\d{3}\?/.test(await frameSrc()), await frameSrc());
+await page.waitForTimeout(300);
+check('the player frame loads (CSP allows it)', playerLoads.length >= 1 && (await page.evaluate(() => window.__csp)).length === 0,
+  JSON.stringify(await page.evaluate(() => window.__csp)));
+await page.selectOption('#reviewScope', 'unsorted');
+check('switching to Unsorted shows the two unsorted clips', (await page.textContent('#reviewTotal')) === '2' && (await page.textContent('#reviewPos')) === '1');
+const firstId = (await frameSrc()).match(/v1\/(\d+)/)[1];
+await page.fill('#reviewForm [name="title"]', 'Beef noodle stall at the night market');
+check('a category is picked from the sort words while typing', (await page.inputValue('#reviewCategory')) === 'Food',
+  await page.textContent('#reviewSuggest'));
+check('and it says why', /Picked .*Food because of .*night market/.test(await page.textContent('#reviewSuggest')), await page.textContent('#reviewSuggest'));
+await page.fill('#reviewForm [name="city"]', 'Taipei');
+await page.press('#reviewForm [name="city"]', 'Enter');
+check('Enter saves and moves to the next clip', (await page.textContent('#reviewPos')) === '2' && !(await frameSrc()).includes(firstId));
+check('the next clip starts empty', (await page.inputValue('#reviewForm [name="title"]')) === '' && (await page.inputValue('#reviewCategory')) === 'Unsorted');
+await page.fill('#reviewForm [name="notes"]', 'not sure yet');
+page.once('dialog', d => d.dismiss());
+await page.keyboard.press('Control+ArrowLeft');
+check('unsaved changes are not thrown away without asking', (await page.textContent('#reviewPos')) === '2' && (await page.inputValue('#reviewForm [name="notes"]')) === 'not sure yet');
+page.once('dialog', d => d.accept());
+await page.keyboard.press('Control+ArrowLeft');
+check('Ctrl+Left goes back, with the saved details', (await page.textContent('#reviewPos')) === '1'
+  && (await page.inputValue('#reviewForm [name="title"]')) === 'Beef noodle stall at the night market' && (await frameSrc()).includes(firstId));
+await page.keyboard.press('Control+ArrowRight'); await page.keyboard.press('Control+ArrowRight');
+check('at the end it says what happened', await page.isVisible('#reviewDone') && /1 saved, 2 skipped/.test(await page.textContent('#reviewDoneLine')),
+  await page.textContent('#reviewDoneLine'));
+check('the player stops at the end', (await page.$$('#reviewFrame iframe')).length === 0);
+await page.click('#reviewFinish');
+check('Close closes it', !(await page.isVisible('#reviewDialog')));
+await page.selectOption('#analysisFilter', 'all');
+const saved = await page.$$eval('#clipGrid .clip-card', els => els.map(e => ({ title: e.querySelector('h3').textContent,
+  category: e.querySelector('.category').textContent, status: e.querySelector('.status').textContent, why: e.querySelector('.sorted-why')?.textContent || '' }))
+  .find(c => c.title === 'Beef noodle stall at the night market'));
+check('the saved clip is reviewed, in Food, with its reason', saved && saved.category === 'Food' && /Reviewed/.test(saved.status) && /night market/.test(saved.why), JSON.stringify(saved));
+check('the review count went down', /3 clips need review/.test(await page.textContent('#reviewCount')));
+const cardIds = await page.$$eval('#clipGrid [data-action="watch"]', els => els.map(e => e.dataset.id));
+await page.click(`#clipGrid [data-action="watch"][data-id="${cardIds[2]}"]`);
+await page.waitForSelector('#reviewDialog[open]');
+check('Watch opens that clip among the clips on screen', (await page.textContent('#reviewPos')) === '3' && (await page.textContent('#reviewTotal')) === String(cardIds.length)
+  && (await page.inputValue('#reviewScope')) === 'shown');
+await page.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-review.png') });
+await page.fill('#reviewForm [name="notes"]', 'line one');
+await page.press('#reviewForm [name="notes"]', 'Control+Enter');
+check('Ctrl+Enter in the notes saves once and moves on once', (await page.textContent('#reviewPos')) === '4');
+await page.keyboard.press('Escape');
+check('Esc closes it and the player', !(await page.isVisible('#reviewDialog')) && (await page.$$('#reviewFrame iframe')).length === 0);
+check('no CSP problems', (await page.evaluate(() => window.__csp)).length === 0, JSON.stringify(await page.evaluate(() => window.__csp)));
 
 // ---- Settings: rename, delete, add, turn the Itinerary off
 await page.click('.nav-link[data-tab="settings"]');
@@ -203,6 +268,14 @@ await res.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(
 await res.click('[data-starter="research"]');
 check('Research: no Itinerary tab', !(await res.isVisible('.nav-link[data-tab="itinerary"]')));
 check('Research: its own heading', (await res.textContent('#heroTitle')) === 'All the things you learned.');
+await res.click('[data-tab="import"]'); await res.fill('#bulkLinks', 'https://vm.tiktok.com/ZMabc123/'); await res.click('#bulkImport');
+await res.click('.nav-link[data-tab="library"]'); await res.click('#clipGrid [data-action="watch"]');
+check('a short link without a video number says so instead of a broken player',
+  (await res.$$('#reviewFrame iframe')).length === 0 && /cannot play here/.test(await res.textContent('#reviewFrame')));
+await res.setViewportSize({ width: 390, height: 844 });
+await res.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-review-phone.png') });
+const sideways = await res.evaluate(() => document.querySelector('#reviewDialog').scrollWidth > document.querySelector('#reviewDialog').clientWidth);
+check('Review fits a phone screen', !sideways);
 
 check('no page errors', errors.length === 0, errors.join(' | '));
 

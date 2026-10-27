@@ -183,3 +183,30 @@ test('every file the page loads exists',()=>{
  assert.ok(files.length>=4,files.join(','));
  for(const f of files)assert.ok(fs.existsSync(path.join(pub,f)),'public/'+f+' is missing');
 });
+
+test('the embedded player plays a clip by its video id; short links have none',()=>{
+ assert.equal(C.playerUrl({videoId:'7662085125500407061'}).split('?')[0],'https://www.tiktok.com/player/v1/7662085125500407061');
+ assert.equal(C.playerUrl({videoId:''}),'');
+ assert.equal(C.playerUrl({videoId:'12"><script>'}),'');
+});
+test('review queues: needs review, unsorted, a collection, all; newest saved first',()=>{
+ const rec=[{id:'a',status:'unreviewed',category:'Food',savedAt:'2026-01-01',collections:['Taiwan']},
+  {id:'b',status:'reviewed',category:'Unsorted',savedAt:'2026-03-01',collections:[]},
+  {id:'c',status:'unreviewed',category:'Unsorted',savedAt:'2026-02-01',collections:['Taiwan']}];
+ assert.deepEqual(C.reviewQueue(rec,'review'),['c','a']);
+ assert.deepEqual(C.reviewQueue(rec,'unsorted'),['b','c']);
+ assert.deepEqual(C.reviewQueue(rec,'collection:Taiwan'),['c','a']);
+ assert.deepEqual(C.reviewQueue(rec,'all'),['b','c','a']);
+});
+test('a review save keeps the link, creator and lookup; marks reviewed; explains a suggested category',()=>{
+ const old=C.createRecord({id:'k1',url:'https://www.tiktokv.com/share/video/7662085125500407061/',creator:'@c',savedAt:'2026-02-01',
+  title:'',category:'Unsorted',collections:['Taiwan'],enrichment:{status:'empty',reason:'EMPTY_METADATA'}});
+ const fields={title:'Beef noodle soup',category:'Food',place:'Lin Dong Fang',city:'Taipei',country:'Taiwan',
+  tags:'noodles, beef',collections:'Taiwan, Must try',notes:'Go early',caption:''};
+ const r=C.reviewEdit(old,fields,{suggested:{name:'Food',words:['noodle']},now:'2026-10-27T00:00:00Z'});
+ assert.equal(r.id,'k1'); assert.equal(r.url,old.url); assert.equal(r.creator,'@c'); assert.equal(r.savedAt,'2026-02-01');
+ assert.equal(r.status,'reviewed'); assert.deepEqual(r.tags,['noodles','beef']); assert.deepEqual(r.collections,['Taiwan','Must try']);
+ assert.equal(r.enrichment.reason,'EMPTY_METADATA'); assert.deepEqual(r.autoSorted.words,['noodle']);
+ const picked=C.reviewEdit(old,{...fields,category:'Shopping'},{reviewed:false,suggested:{name:'Food',words:['noodle']}});
+ assert.equal(picked.status,'unreviewed'); assert.equal(picked.autoSorted,undefined,'a category the person picked needs no explanation');
+});
