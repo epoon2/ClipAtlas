@@ -1,7 +1,7 @@
 // src/understand.js and /api/understand, with Workers AI replaced by a fake.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readUnderstandRequest, parseReply, cleanAnswer, understandClip, buildPrompt, WHISPER, VISION, TEXT } from '../src/understand.js';
+import { readUnderstandRequest, readTranscribeRequest, transcribeAudio, parseReply, cleanAnswer, understandClip, buildPrompt, WHISPER, VISION, TEXT } from '../src/understand.js';
 import worker from '../src/worker.js';
 
 const AUDIO = Buffer.from('RIFF....WAVEfmt fake sound').toString('base64');
@@ -20,18 +20,36 @@ function fakeAI({ said = 'best beef noodles in taipei', reply = '```json\n' + JS
     return { response: reply };
   } };
 }
-const request = (extra = {}) => readUnderstandRequest({ audio: AUDIO, image: IMAGE, categories: CATEGORIES, ...extra });
+const request = (extra = {}) => readUnderstandRequest({ transcript: 'best beef noodles in taipei', image: IMAGE, categories: CATEGORIES, ...extra });
 
 test('what the browser sends is checked before anything is asked', () => {
+  assert.equal(readTranscribeRequest({ audio: AUDIO }).ok, true);
+  assert.equal(readTranscribeRequest({ audio: 'not base64!' }).ok, false);
+  assert.equal(readTranscribeRequest({ audio: 'A'.repeat(3_300_000) }).ok, false, 'at most a minute at a time');
+  assert.equal(readTranscribeRequest({}).ok, false);
   assert.equal(request().ok, true);
-  assert.equal(readUnderstandRequest({ audio: 'not base64!', categories: [] }).ok, false);
   assert.equal(readUnderstandRequest({ image: 'data:image/png;base64,AAAA', categories: [] }).ok, false, 'JPEG only');
   assert.equal(readUnderstandRequest({ image: 'https://example.com/x.jpg', categories: [] }).ok, false);
-  assert.equal(readUnderstandRequest({ audio: 'A'.repeat(3_300_000), categories: [] }).ok, false);
-  assert.equal(readUnderstandRequest({ audio: AUDIO }).ok, false, 'categories are required');
+  assert.equal(readUnderstandRequest({ transcript: 'x' }).ok, false, 'categories are required');
   assert.equal(readUnderstandRequest([]).ok, false);
+  assert.equal(readUnderstandRequest({ transcript: 'y'.repeat(9000), categories: [] }).transcript.length, 4000);
   assert.deepEqual(readUnderstandRequest({ categories: [{ name: 'Unsorted' }, { name: ' Food ', words: ['x'] }] }).categories,
     [{ name: 'Food', words: ['x'] }]);
+});
+
+test('a piece of sound becomes words; music and silence become nothing', async () => {
+  const ai = fakeAI();
+  const r = await transcribeAudio(AUDIO, ai);
+  assert.deepEqual([r.status, r.text], ['transcribed', 'best beef noodles in taipei']);
+  assert.deepEqual(ai.calls[0], { model: WHISPER, input: { audio: AUDIO, task: 'transcribe', vad_filter: true } });
+  for (const said of [' Thank you for watching. ', '', '♪♪', 'you']) {
+    const q = await transcribeAudio(AUDIO, fakeAI({ said }));
+    assert.deepEqual([q.status, q.reason, q.text], ['empty', 'NOTHING_SAID', ''], JSON.stringify(said));
+  }
+  const limit = await transcribeAudio(AUDIO, fakeAI({ fail: { [WHISPER]: '4006: you have used up your daily free allocation of 10,000 neurons' } }));
+  assert.deepEqual([limit.status, limit.reason], ['failed', 'AI_DAILY_LIMIT']);
+  const down = await transcribeAudio(AUDIO, fakeAI({ fail: { [WHISPER]: 'boom' } }));
+  assert.deepEqual([down.status, down.reason], ['failed', 'AI_FAILED']);
 });
 
 test('a reply is read even when wrapped in prose or code fences', () => {
@@ -72,49 +90,36 @@ test('the vision model\'s license is accepted once, then the clip is read', asyn
   assert.equal(ai.calls.filter(c => c.input.prompt === 'agree').length, 1);
 });
 
-test('sound and screenshots: transcript, then the picture with the transcript', async () => {
+test('transcript and screenshots: the picture is read with the transcript and the categories', async () => {
   const ai = fakeAI();
   const r = await understandClip(request(), ai);
   assert.equal(r.status, 'understood');
-  assert.deepEqual(ai.calls.map(c => c.model), [WHISPER, VISION]);
-  assert.equal(ai.calls[0].input.audio, AUDIO);
-  assert.equal(ai.calls[1].input.image, IMAGE);
-  assert.match(ai.calls[1].input.messages[0].content, /best beef noodles in taipei/);
-  assert.equal(r.transcript, 'best beef noodles in taipei');
+  assert.deepEqual(ai.calls.map(c => c.model), [VISION]);
+  assert.equal(ai.calls[0].input.image, IMAGE);
+  assert.match(ai.calls[0].input.messages[0].content, /best beef noodles in taipei/);
   assert.deepEqual([r.heard, r.seen, r.category, r.city, r.place], [true, true, 'Food', 'Taipei', 'Lin Dong Fang']);
 });
 
-test('music that Whisper hears as "thank you for watching" is not a transcript', async () => {
-  const ai = fakeAI({ said: ' Thank you for watching. ' });
-  const r = await understandClip(request(), ai);
-  assert.equal(r.transcript, '');
-  assert.equal(r.heard, false);
-  assert.equal(r.status, 'understood', 'the screenshots still tell what it is');
-  assert.match(ai.calls[1].input.messages[0].content, /\(nothing said\)/);
-});
-
-test('sound only uses the text model; nothing at all is empty', async () => {
-  const ai = fakeAI();
-  const r = await understandClip(request({ image: '' }), ai);
-  assert.deepEqual(ai.calls.map(c => c.model), [WHISPER, TEXT]);
-  assert.equal(r.seen, false);
-  const none = await understandClip(request({ audio: '', image: '' }), fakeAI());
+test('no transcript still uses the picture; no picture uses the text model; neither is empty', async () => {
+  const quiet = fakeAI();
+  const r = await understandClip(request({ transcript: '' }), quiet);
+  assert.equal(r.status, 'understood');
+  assert.match(quiet.calls[0].input.messages[0].content, /\(nothing said\)/);
+  const words = fakeAI();
+  const w = await understandClip(request({ image: '' }), words);
+  assert.deepEqual(words.calls.map(c => c.model), [TEXT]);
+  assert.equal(w.seen, false);
+  const none = await understandClip(request({ transcript: '', image: '' }), fakeAI());
   assert.deepEqual([none.status, none.reason], ['empty', 'NOTHING_TO_READ']);
-  const silent = await understandClip(request({ image: '' }), fakeAI({ said: '' }));
-  assert.deepEqual([silent.status, silent.reason], ['empty', 'NOTHING_TO_READ']);
 });
 
 test('the daily AI allowance and other failures get their own reasons', async () => {
-  const limit = await understandClip(request(), fakeAI({ fail: { [WHISPER]: '4006: you have used up your daily free allocation of 10,000 neurons' } }));
+  const limit = await understandClip(request(), fakeAI({ fail: { [VISION]: '4006: daily free allocation' } }));
   assert.deepEqual([limit.status, limit.reason], ['failed', 'AI_DAILY_LIMIT']);
   const visionDown = await understandClip(request(), fakeAI({ fail: { [VISION]: 'upstream error' } }));
   assert.deepEqual([visionDown.status, visionDown.reason], ['failed', 'AI_FAILED']);
   const garbled = await understandClip(request(), fakeAI({ reply: 'I cannot help with that.' }));
   assert.deepEqual([garbled.status, garbled.reason], ['failed', 'AI_FAILED']);
-  const deafOnly = await understandClip(request({ image: '' }), fakeAI({ fail: { [WHISPER]: 'boom' } }));
-  assert.deepEqual([deafOnly.status, deafOnly.reason], ['failed', 'AI_FAILED']);
-  const deaf = await understandClip(request(), fakeAI({ fail: { [WHISPER]: 'boom' } }));
-  assert.equal(deaf.status, 'understood', 'the screenshots are used when listening fails');
 });
 
 // ---- the route, through the real Worker
@@ -133,24 +138,29 @@ function env({ ai = fakeAI(), daily } = {}) {
     } }; } }; } };
   return { DB, AI: ai, ASSETS: { fetch: () => new Response('asset') }, ...(daily ? { AUTO_REVIEW_DAILY_LIMIT: String(daily) } : {}) };
 }
-const post = (e, body) => worker.fetch(new Request('https://clipatlas.example/api/understand', {
+const postTo = (path, e, body) => worker.fetch(new Request('https://clipatlas.example/api/' + path, {
   method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body),
   headers: { origin: 'https://clipatlas.example', cookie: `clipatlas_session=${TOKEN}`, 'content-type': 'application/json' } }), e);
 
-test('/api/understand: a clip in, its details out; limits and bad input answered plainly', async () => {
-  const ok = await post(env(), { audio: AUDIO, image: IMAGE, categories: CATEGORIES });
+test('/api/transcribe and /api/understand: answers, limits and bad input', async () => {
+  const heard = await postTo('transcribe', env(), { audio: AUDIO });
+  assert.equal(heard.status, 200);
+  assert.equal((await heard.json()).text, 'best beef noodles in taipei');
+  const ok = await postTo('understand', env(), { transcript: 'noodles', image: IMAGE, categories: CATEGORIES });
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).category, 'Food');
-  assert.equal((await post(env(), { audio: '!!', categories: [] })).status, 400);
-  assert.equal((await post(env(), '{not json')).status, 400);
+  assert.equal((await postTo('transcribe', env(), { audio: '!!' })).status, 400);
+  assert.equal((await postTo('understand', env(), '{not json')).status, 400);
   const noAI = env(); delete noAI.AI;
-  assert.equal((await post(noAI, { audio: AUDIO, categories: [] })).status, 503);
+  assert.equal((await postTo('transcribe', noAI, { audio: AUDIO })).status, 503);
   const capped = env({ daily: 1 });
-  assert.equal((await post(capped, { audio: AUDIO, categories: CATEGORIES })).status, 200);
-  const second = await post(capped, { audio: AUDIO, categories: CATEGORIES });
+  assert.equal((await postTo('understand', capped, { transcript: 'x', categories: CATEGORIES })).status, 200);
+  const second = await postTo('understand', capped, { transcript: 'x', categories: CATEGORIES });
   assert.equal(second.status, 429);
   assert.equal((await second.json()).reason, 'CLIPATLAS_LIMIT');
-  const spent = await post(env({ ai: fakeAI({ fail: { [WHISPER]: '4006: daily free allocation' } }) }), { audio: AUDIO, categories: CATEGORIES });
+  for (let i = 0; i < 4; i++) assert.equal((await postTo('transcribe', capped, { audio: AUDIO })).status, 200, 'four pieces per clip');
+  assert.equal((await postTo('transcribe', capped, { audio: AUDIO })).status, 429);
+  const spent = await postTo('transcribe', env({ ai: fakeAI({ fail: { [WHISPER]: '4006: daily free allocation' } }) }), { audio: AUDIO });
   assert.equal(spent.status, 429);
   assert.equal((await spent.json()).reason, 'AI_DAILY_LIMIT');
 });

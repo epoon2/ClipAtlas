@@ -130,6 +130,9 @@ check('auto-review results survive a reload', (await page.$$('#clipGrid .clip-ca
 const id = await page.$eval('#clipGrid [data-action="watch"]', b => b.dataset.id);
 await page.click(`#clipGrid [data-action="watch"][data-id="${id}"]`);
 await page.waitForSelector('#reviewDialog[open]');
+check('Review shows what was said and the text on the video', await page.isVisible('#reviewHeard')
+  && (await page.textContent('#reviewTranscript')) === 'the best beef noodles in taipei'
+  && (await page.textContent('#reviewSeen')) === 'BEST BEEF NOODLES TAIPEI', await page.textContent('#reviewHeard'));
 await page.press('#reviewForm [name="title"]', 'Enter');
 await page.click('#reviewClose');
 check('a clip checked in Review mode loses the Auto-reviewed badge', (await page.$$('#clipGrid .clip-card')).length === 1);
@@ -138,6 +141,22 @@ check('a clip checked in Review mode loses the Auto-reviewed badge', (await page
 await page.click('#startAuto');
 check('a second run offers no clip twice', /^No clips to auto-review/.test(await page.textContent('#autoEstimate')) || /^1 clip/.test(await page.textContent('#autoEstimate')),
   await page.textContent('#autoEstimate'));
+
+// Transcript only, redoing everything: sound only, no screenshots read, details kept.
+const visionBefore = asked.filter(a => a.image).length, heardBefore = asked.filter(a => a.model.includes('whisper')).length;
+await page.selectOption('#autoMode', 'transcript');
+check('transcript only hides "mark reviewed"', !(await page.isVisible('#autoMarkWrap')));
+await page.check('#autoRedo');
+await page.selectOption('#autoScope', 'all');
+await page.selectOption('#autoCap', '180');
+await page.click('#autoStart');
+await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three)/.test(document.getElementById('autoNow').textContent), null, { timeout: 90000 });
+const second = await page.textContent('#autoNow');
+check('a transcript-only run transcribes and reads no screenshots', /^Done\. 0 filled in, 2 transcribed, 0 nothing heard or seen, 1 would not play/.test(second)
+  && asked.filter(a => a.image).length === visionBefore && asked.filter(a => a.model.includes('whisper')).length === heardBefore + 2, second);
+await page.click('#autoClose');
+await page.selectOption('#statusFilter', 'all');
+check('details found earlier are kept', (await page.$$eval('#clipGrid h3', els => els.filter(e => e.textContent === 'Beef noodles in Taipei').length)) === 2);
 check('no CSP problems and no page errors', (await page.evaluate(() => window.__csp)).length === 0 && errors.length === 0,
   JSON.stringify(await page.evaluate(() => window.__csp)) + ' ' + errors.join(' | '));
 

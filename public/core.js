@@ -109,10 +109,12 @@
     return /[",\r\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
   }
   const CSV_FIELDS = ['url', 'title', 'category', 'collection', 'tags', 'place', 'city', 'country', 'notes', 'caption', 'creator', 'savedAt', 'status'];
+  const CSV_EXPORT = [...CSV_FIELDS, 'transcript'];
   function csvTemplate() { return CSV_FIELDS.join(',') + '\n'; }
   function recordsToCSV(records) {
-    const rows = records.map(v => ({ ...v, collection: (v.collections || []).join(' | '), tags: (v.tags || []).join(' | ') }));
-    return [CSV_FIELDS.join(','), ...rows.map(v => CSV_FIELDS.map(f => csvEscape(v[f])).join(','))].join('\r\n') + '\r\n';
+    const rows = records.map(v => ({ ...v, collection: (v.collections || []).join(' | '), tags: (v.tags || []).join(' | '),
+      transcript: (v.auto && v.auto.transcript) || '' }));
+    return [CSV_EXPORT.join(','), ...rows.map(v => CSV_EXPORT.map(f => csvEscape(v[f])).join(','))].join('\r\n') + '\r\n';
   }
   function toDate(v) {
     const s = safeString(v);
@@ -370,11 +372,11 @@
     }
     return moved;
   }
-  const AUTO_STATUSES = ['understood', 'empty', 'unavailable', 'failed'];
+  const AUTO_STATUSES = ['understood', 'transcribed', 'empty', 'unavailable', 'failed'];
   function cleanAuto(a) {
     if (!a || typeof a !== 'object' || !AUTO_STATUSES.includes(a.status)) return undefined;
     return { status: a.status, reason: safeString(a.reason).slice(0, 40), at: safeString(a.at).slice(0, 40),
-      heard: !!a.heard, seen: !!a.seen, transcript: safeString(a.transcript).slice(0, 1200),
+      heard: !!a.heard, seen: !!a.seen, transcript: safeString(a.transcript).slice(0, 4000),
       onScreen: safeString(a.onScreen).slice(0, 600), summary: safeString(a.summary).slice(0, 240) };
   }
   function cleanAutoSorted(a) {
@@ -425,16 +427,25 @@
      The page plays each clip in TikTok's player, records the tab's sound and
      takes screenshots of the player; the Worker turns those into the details
      below. These helpers are the parts that need no browser. */
-  const AUTO_LABELS = { understood: 'Auto-reviewed', empty: 'Nothing heard or seen', unavailable: 'Would not play',
-    failed: 'Auto-review failed' };
+  const AUTO_LABELS = { understood: 'Auto-reviewed', transcribed: 'Transcribed', empty: 'Nothing heard or seen',
+    unavailable: 'Would not play', failed: 'Auto-review failed' };
   /** Clips for an auto-review run: the scope's clips that can play and have
-      not been tried yet (failed ones are tried again), or all with ``redo``. */
-  function autoQueue(records, scope, { redo = false } = {}) {
+      not been done yet (failed ones are tried again; a transcript-only clip
+      still needs its details), or all with ``redo``. ``mode`` is 'details'
+      (transcript and details) or 'transcript' (transcript only). */
+  function autoQueue(records, scope, { redo = false, mode = 'details' } = {}) {
     const byId = new Map((records || []).map(r => [r.id, r]));
+    const again = mode === 'transcript' ? ['failed'] : ['failed', 'transcribed'];
     return reviewQueue(records, scope).filter(id => {
       const r = byId.get(id);
-      return playerUrl(r) && (redo || !r.auto || r.auto.status === 'failed');
+      return playerUrl(r) && (redo || !r.auto || again.includes(r.auto.status));
     });
+  }
+  /** [start, end) sample ranges of at most ``seconds`` each, for sending a long clip's sound a piece at a time. */
+  function pieces(length, rate, seconds = 55) {
+    const size = Math.max(1, Math.floor(rate * seconds)), out = [];
+    for (let at = 0; at < length; at += size) out.push([at, Math.min(length, at + size)]);
+    return out;
   }
   /** One clip after auto-review: empty fields filled in, an Unsorted clip
       sorted, tags added, and what was heard and seen kept (searchable). What
@@ -444,6 +455,13 @@
     const next = { ...record, tags: [...(record.tags || [])] };
     next.auto = cleanAuto({ ...res, status: AUTO_STATUSES.includes(res.status) ? res.status : 'failed', at: now });
     next.updatedAt = now;
+    if (res.status === 'transcribed') {
+      // Transcript only: nothing else changes (details found earlier stay).
+      if (record.auto && record.auto.status === 'understood') {
+        next.auto = { ...cleanAuto(record.auto), transcript: next.auto.transcript, heard: next.auto.heard, at: now };
+      }
+      return next;
+    }
     if (next.auto.status !== 'understood') return next;
     const fill = (key, value, n) => { if (!safeString(next[key]) && safeString(value)) next[key] = safeString(value).slice(0, n); };
     fill('title', res.title, 300); fill('place', res.place, 200); fill('city', res.city, 120); fill('country', res.country, 120);
@@ -514,6 +532,38 @@
     return next;
   }
 
+  /* ---- Many clips at once ---- */
+  /** Remove the clips ``ids`` and their itinerary stops. Returns {state,
+      removed} where ``removed`` can be given to restoreRecords to undo it. */
+  function removeRecords(state, ids) {
+    const gone = new Set(ids);
+    const records = [], plan = [];
+    (state.records || []).forEach((r, index) => { if (gone.has(r.id)) records.push({ index, record: r }); });
+    (state.plan || []).forEach((p, index) => { if (gone.has(p.recordId)) plan.push({ index, stop: p }); });
+    return { state: { ...state, records: (state.records || []).filter(r => !gone.has(r.id)),
+      plan: (state.plan || []).filter(p => !gone.has(p.recordId)) }, removed: { records, plan } };
+  }
+  /** Put removed clips (and their stops) back where they were. */
+  function restoreRecords(state, removed) {
+    const records = [...(state.records || [])], plan = [...(state.plan || [])];
+    const known = new Set(records.map(r => r.key || r.id));
+    for (const { index, record } of removed.records) if (!known.has(record.key || record.id)) records.splice(Math.min(index, records.length), 0, record);
+    const ids = new Set(records.map(r => r.id));
+    for (const { index, stop } of removed.plan) if (ids.has(stop.recordId) && !plan.some(p => p.id === stop.id)) plan.splice(Math.min(index, plan.length), 0, stop);
+    return { ...state, records, plan };
+  }
+  /** Give the clips ``ids`` a category or a review status. */
+  function updateRecords(state, ids, { category, status } = {}, now = isoNow()) {
+    const pick = new Set(ids), name = category === undefined ? undefined : (categoryName(category) || 'Unsorted');
+    return { ...state, records: (state.records || []).map(r => {
+      if (!pick.has(r.id)) return r;
+      const next = { ...r, updatedAt: now };
+      if (name !== undefined && name !== r.category) { next.category = name; next.autoSorted = undefined; }
+      if (status === 'reviewed' || status === 'unreviewed') { next.status = status; next.autoReviewed = undefined; }
+      return next;
+    }) };
+  }
+
   function planMarkdown(items, records, title) {
     const byId = new Map(records.map(v => [v.id, v]));
     const groups = new Map();
@@ -538,5 +588,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, applyUnderstanding, wavBytes, downsample, loudness, shotTimes, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

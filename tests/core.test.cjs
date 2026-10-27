@@ -251,3 +251,29 @@ test('sound helpers: WAV header, downsampling, loudness, screenshot times',()=>{
  assert.deepEqual(C.shotTimes(45).map(t=>Math.round(t*10)/10),[1.2,20.3,36]);
  assert.deepEqual(C.shotTimes(2).map(t=>Math.round(t*10)/10),[1.2]);
 });
+test('transcript only: kept and searchable, nothing else changes; a details run picks it up later',()=>{
+ const old=C.createRecord({id:'t',url:'https://www.tiktok.com/@a/video/7000000000000000007',category:'Unsorted'});
+ const t=C.applyUnderstanding(old,{status:'transcribed',heard:true,transcript:'word '.repeat(900)});
+ assert.deepEqual([t.status,t.category,t.title,t.autoReviewed],['unreviewed','Unsorted','',undefined]);
+ assert.equal(t.auto.status,'transcribed'); assert.equal(t.auto.transcript.length,4000);
+ assert.deepEqual(C.autoQueue([t],'all',{mode:'transcript'}),[]);
+ assert.deepEqual(C.autoQueue([t],'all'),['t'],'details still to do');
+ const done=C.applyUnderstanding(t,{status:'understood',transcript:'new words',title:'X',category:'Food'});
+ const again=C.applyUnderstanding(done,{status:'transcribed',heard:true,transcript:'newer words'});
+ assert.deepEqual([again.auto.status,again.auto.transcript,again.title],['understood','newer words','X'],'details stay');
+ assert.deepEqual(C.pieces(130,10,6),[[0,60],[60,120],[120,130]]);
+ assert.match(C.recordsToCSV([again]).split('\r\n')[0],/,transcript$/);
+ assert.match(C.recordsToCSV([again]),/newer words/);
+});
+test('many clips at once: delete with undo, move, mark reviewed',()=>{
+ const st={records:[{id:'a',key:'k:a',category:'Food'},{id:'b',key:'k:b',category:'Food',autoReviewed:true},{id:'c',key:'k:c',category:'Shopping'}],
+  plan:[{id:'p1',recordId:'b',day:1},{id:'p2',recordId:'c',day:2}],categories:[{name:'Food'},{name:'Shopping'}]};
+ const {state:after,removed}=C.removeRecords(st,['a','b']);
+ assert.deepEqual(after.records.map(r=>r.id),['c']); assert.deepEqual(after.plan.map(p=>p.id),['p2']);
+ const back=C.restoreRecords(after,removed);
+ assert.deepEqual(back.records.map(r=>r.id),['a','b','c']); assert.deepEqual(back.plan.map(p=>p.id),['p1','p2']);
+ assert.deepEqual(C.restoreRecords(back,removed).records.length,3,'undo twice adds nothing twice');
+ const moved=C.updateRecords(st,['a','b'],{category:'Shopping',status:'reviewed'},'2026-10-27');
+ assert.deepEqual(moved.records.map(r=>[r.category,r.status||'']),[['Shopping','reviewed'],['Shopping','reviewed'],['Shopping','']]);
+ assert.equal(moved.records[1].autoReviewed,undefined);
+});

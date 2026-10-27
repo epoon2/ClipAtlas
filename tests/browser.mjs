@@ -189,6 +189,38 @@ await page.screenshot({ path: process.env.SHOT || '/tmp/clipatlas.png', fullPage
 await page.click('.nav-link[data-tab="settings"]');
 await page.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-settings.png'), fullPage: true });
 
+// ---- Many clips at once: select, select a whole category from Settings, delete with undo, move, mark reviewed
+const cardCount = () => page.$$eval('#clipGrid .clip-card', els => els.length);
+const eatsButton = page.locator('.cat-row', { has: page.locator('input.cat-name[value="Eats"]') }).locator('[data-cat-select]');
+const eatsCount = Number((await eatsButton.textContent()).match(/\d+/)[0]);
+await eatsButton.click();
+check('a category\'s clip count in Settings selects those clips', (await page.inputValue('#categoryFilter')) === 'Eats'
+  && (await page.textContent('#bulkCount')) === `${eatsCount} selected` && (await cardCount()) === eatsCount && eatsCount > 0,
+  `${await page.textContent('#bulkCount')} of ${eatsCount}`);
+page.once('dialog', d => d.accept());
+await page.click('#bulkDelete');
+check('Delete removes them', (await cardCount()) === 0 && /Deleted/.test(await page.textContent('#toast')));
+await page.click('#toast .toast-action');
+check('Undo brings them back', (await cardCount()) === eatsCount);
+await page.selectOption('#categoryFilter', 'all');
+const total = await cardCount();
+await page.click('#bulkClear');
+await page.click('#clipGrid .clip-card h3');
+check('clicking a card picks it', (await page.textContent('#bulkCount')) === '1 selected' && (await page.$$('#clipGrid .clip-card.picked')).length === 1);
+await page.click('#clipGrid .clip-card .pick input');
+check('its checkbox unpicks it', (await page.textContent('#bulkCount')) === '0 selected');
+await page.click('#bulkAll');
+await page.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-select.png') });
+check('select all shown picks every card', (await page.textContent('#bulkCount')) === `${total} selected`);
+await page.click('#bulkClear');
+await page.click('#clipGrid .clip-card h3');
+await page.selectOption('#bulkMove', 'Hikes');
+check('Move to category moves the picked clip', (await page.$$eval('#clipGrid .category', els => els.map(e => e.textContent))).includes('Hikes'));
+await page.click('#bulkReviewed');
+check('Mark reviewed marks it', /Marked 1 clip reviewed/.test(await page.textContent('#toast')));
+await page.click('#bulkDone');
+check('Done leaves select mode', !(await page.isVisible('#bulkBar')) && (await page.$$('#clipGrid .pick')).length === 0);
+
 // ---- an account from before categories keeps its list and its Itinerary
 async function api(path, method, body, cookie) {
   const res = await worker.fetch(new Request(base + 'api/' + path, { method, body: body && JSON.stringify(body),

@@ -10,11 +10,18 @@
   const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7 });
   let state = emptyState();
   let currentTab = 'library', activeCollection = '', editingId = null, saveTimer = null;
+  let selecting = false; const selected = new Set();  // choosing many clips at once
   let toastTimer = null;
 
-  function toast(message) {
-    const el = $('#toast'); el.textContent = message; el.classList.add('shown');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('shown'), 4500);
+  function toast(message, action) {
+    const el = $('#toast'); el.textContent = message; el.classList.toggle('with-action', !!action);
+    if (action) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-action'; b.textContent = action.label;
+      b.onclick = () => { el.classList.remove('shown'); action.run(); };
+      el.append(' ', b);
+    }
+    el.classList.add('shown');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('shown'), action ? 12000 : 4500);
   }
   function dbOpen() {
     return new Promise((resolve, reject) => {
@@ -97,6 +104,7 @@
   const listCollections = () => [...new Set([...state.collections, ...state.records.flatMap(r => r.collections || [])])].sort((a,b)=>a.localeCompare(b));
   function selectTab(tab) {
     if (!['library','itinerary','import','settings'].includes(tab) || (tab==='itinerary' && !tabOn('itinerary'))) return;
+    if(tab!=='library'&&selecting){selecting=false;selected.clear();document.body.classList.remove('selecting');}
     currentTab=tab;
     $$('.page').forEach(x=>x.classList.toggle('active',x.id===tab+'Page'));
     $$('.nav-link').forEach(x=>x.classList.toggle('active',x.dataset.tab===tab));
@@ -132,6 +140,7 @@
     records.sort((a,b) => sort==='title'?(a.title||a.place||'').localeCompare(b.title||b.place||''):
       sort==='oldest'?(a.savedAt||a.createdAt).localeCompare(b.savedAt||b.createdAt):(b.savedAt||b.createdAt).localeCompare(a.savedAt||a.createdAt));
     shownIds=records.map(r=>r.id);
+    renderBulkBar();
     $('#filteredCount').textContent=records.length+' '+(records.length===1?'clip':'clips');
     $('#libraryEmpty').hidden=records.length!==0;
     $('#clipGrid').innerHTML=records.map(r=>{
@@ -139,7 +148,7 @@
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card"><div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||r.auto.reason||'')}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||r.auto.reason||'')}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
   function renderItinerary() {
@@ -422,6 +431,11 @@
     if($('#reviewCategory').value!==(r.category||'Unsorted'))$('#reviewCategory').value='Unsorted';
     f.reviewed.checked=true;
     rv.fromUnsorted=!r.category||r.category==='Unsorted';rv.touched=false;rv.dirty=false;
+    const said=r.auto?.transcript||'',shown=r.auto?.onScreen||'';
+    $('#reviewHeard').hidden=!said&&!shown;
+    $('#reviewTranscript').textContent=said||'Nothing was said, or it has not been transcribed yet.';
+    $('#copyTranscript').hidden=!said;
+    $('#reviewSeenHead').hidden=$('#reviewSeen').hidden=!shown;$('#reviewSeen').textContent=shown;
     updateSuggestion();
     $('#reviewPrev').disabled=rv.index===0;
     setPlayer(r);
@@ -472,6 +486,10 @@
       if(!leaveClip()){evt.target.value=rv.scope;return;}
       rv.dirty=false;openReview(evt.target.value);
     });
+    $('#copyTranscript').addEventListener('click',async()=>{
+      try{await navigator.clipboard.writeText($('#reviewTranscript').textContent);toast('Transcript copied.');}
+      catch(_){toast('Copying is blocked here; select the text and copy it instead.');}
+    });
     $('#reviewPrev').addEventListener('click',()=>reviewMove(-1));
     $('#reviewSkip').addEventListener('click',()=>reviewMove(1));
     $('#reviewClose').addEventListener('click',closeReview);
@@ -486,21 +504,79 @@
       else if(mod&&evt.key==='Enter'){evt.preventDefault();reviewSave();}
     });
   }
+  /* ---- Choosing many clips: delete, move to a category, mark reviewed ---- */
+  function renderBulkBar(){
+    const bar=$('#bulkBar');if(!bar)return;
+    for(const id of [...selected])if(!state.records.some(r=>r.id===id))selected.delete(id);
+    $('#selectMode').textContent=selecting?'✓ Done selecting':'☐ Select';
+    bar.hidden=!selecting;document.body.classList.toggle('selecting',selecting);if(!selecting)return;
+    const n=selected.size,cat=$('#categoryFilter').value;
+    $('#bulkCount').textContent=`${n} selected`;
+    const all=shownIds.length&&shownIds.every(id=>selected.has(id));
+    $('#bulkAll').textContent=all?'Unselect all shown':(cat!=='all'&&!activeCollection&&!$('#search').value.trim()&&$('#statusFilter').value==='all'&&$('#analysisFilter').value==='all'
+      ?`Select all ${shownIds.length} in ${cat==='Unsorted'?'Unsorted':emojiFor(cat)+' '+cat}`:`Select all ${shownIds.length} shown`);
+    $('#bulkAll').disabled=!shownIds.length;
+    fillCategorySelect($('#bulkMove'),false);
+    $('#bulkMove').insertAdjacentHTML('afterbegin','<option value="" selected>Move to category…</option>');$('#bulkMove').value='';
+    for(const id of ['bulkMove','bulkReviewed','bulkDelete'])$('#'+id).disabled=!n;
+    $('#bulkDelete').textContent=n?`Delete ${n}`:'Delete';
+  }
+  function setSelecting(on){selecting=on;if(!on)selected.clear();renderLibrary();}
+  function bulkDelete(){
+    const ids=[...selected];if(!ids.length)return;
+    if(!confirm(`Delete ${ids.length} clip${ids.length===1?'':'s'}? ${ids.length===1?'It':'They'} also leave${ids.length===1?'s':''} the itinerary. You can undo this for a few seconds.`))return;
+    const {state:next,removed}=C.removeRecords(state,ids);
+    state=next;selected.clear();commit();
+    toast(`Deleted ${ids.length} clip${ids.length===1?'':'s'}.`,{label:'Undo',run:()=>{state=C.restoreRecords(state,removed);commit();toast('Brought them back.');}});
+  }
+  function bulkUpdate(changes,said){
+    const ids=[...selected];if(!ids.length)return;
+    state=C.updateRecords(state,ids,changes);commit();toast(said(ids.length));
+  }
+  function initBulk(){
+    $('#selectMode').addEventListener('click',()=>setSelecting(!selecting));
+    $('#bulkDone').addEventListener('click',()=>setSelecting(false));
+    $('#bulkClear').addEventListener('click',()=>{selected.clear();renderLibrary();});
+    $('#bulkAll').addEventListener('click',()=>{
+      const all=shownIds.every(id=>selected.has(id));
+      for(const id of shownIds)all?selected.delete(id):selected.add(id);renderLibrary();
+    });
+    $('#bulkDelete').addEventListener('click',bulkDelete);
+    $('#bulkReviewed').addEventListener('click',()=>bulkUpdate({status:'reviewed'},n=>`Marked ${n} clip${n===1?'':'s'} reviewed.`));
+    $('#bulkMove').addEventListener('change',e=>{const to=e.target.value;if(!to)return;
+      bulkUpdate({category:to},n=>`Moved ${n} clip${n===1?'':'s'} to ${to}.`);});
+    // In select mode a click anywhere on a card (but its buttons and links) picks it.
+    $('#clipGrid').addEventListener('click',e=>{
+      if(!selecting)return;
+      const card=e.target.closest('[data-card]');if(!card)return;
+      if(e.target.closest('button,a'))return;
+      const id=card.dataset.card;
+      if(!e.target.matches('[data-pick]'))e.preventDefault();
+      selected.has(id)?selected.delete(id):selected.add(id);renderLibrary();
+    });
+  }
+  // Settings: "12 clips" next to a category selects them in Discoveries.
+  function selectCategory(name){
+    activeCollection='';$('#search').value='';$('#statusFilter').value='all';$('#analysisFilter').value='all';
+    $('#categoryFilter').value=name;selecting=true;selected.clear();selectTab('library');
+    for(const id of shownIds)selected.add(id);renderLibrary();
+  }
   /* ---- Auto-review: play each clip, record the tab's sound and screenshots, let the Worker fill it in ---- */
-  const AUTO_REASONS={NOTHING_TO_READ:'nothing heard or seen',NO_PLAYER:'player did not load',STALLED:'stopped playing',
+  const AUTO_REASONS={NOTHING_TO_READ:'nothing heard or seen',NOTHING_SAID:'nothing said',NO_PLAYER:'player did not load',STALLED:'stopped playing',
     NOT_FOUND:'removed or private',PLAYBACK:'would not play',AUTOPLAY:'blocked from playing',AI_FAILED:'AI problem',
     BAD_INPUT:'could not be read',NETWORK:'connection problem'};
   let auto=null; // the run in progress
   const autoSupported=()=>!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia&&window.AudioWorkletNode&&!/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent));
   function autoScopes(){
-    const redo=$('#autoRedo').checked;
-    const out=Object.entries(C.REVIEW_SCOPES).map(([k,label])=>[k,label,C.autoQueue(state.records,k,{redo}).length]);
-    for(const name of listCollections())out.push(['collection:'+name,'Collection: '+name,C.autoQueue(state.records,'collection:'+name,{redo}).length]);
+    const opts={redo:$('#autoRedo').checked,mode:$('#autoMode').value};
+    const out=Object.entries(C.REVIEW_SCOPES).map(([k,label])=>[k,label,C.autoQueue(state.records,k,opts).length]);
+    for(const name of listCollections())out.push(['collection:'+name,'Collection: '+name,C.autoQueue(state.records,'collection:'+name,opts).length]);
     return out;
   }
   function autoEstimate(){
-    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked});
-    const minutes=Math.ceil(queue.length*(Number($('#autoCap').value)+8)/60);
+    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked,mode:$('#autoMode').value});
+    $('#autoMarkWrap').hidden=$('#autoMode').value==='transcript';
+    const minutes=Math.ceil(queue.length*(Math.min(Number($('#autoCap').value),60)+8)/60);
     const short=state.records.filter(r=>!C.playerUrl(r)).length;
     $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
       (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
@@ -520,11 +596,16 @@
   function autoSay(text){$('#autoNow').textContent=text;}
   function autoCounts(){
     const t=auto.tally;
-    $('#autoCounts').textContent=`${auto.index>=auto.queue.length?'All '+auto.queue.length+' clips':'Clip '+(auto.index+1)+' of '+auto.queue.length} · ${t.understood||0} filled in · ${t.empty||0} nothing heard or seen · ${t.unavailable||0} would not play · ${t.failed||0} failed`;
+    $('#autoCounts').textContent=`${auto.index>=auto.queue.length?'All '+auto.queue.length+' clips':'Clip '+(auto.index+1)+' of '+auto.queue.length} · ${auto.mode==='transcript'?(t.transcribed||0)+' transcribed':(t.understood||0)+' filled in'} · ${t.empty||0} nothing heard or seen · ${t.unavailable||0} would not play · ${t.failed||0} failed`;
     $('#autoBar').style.width=Math.round(auto.index/auto.queue.length*100)+'%';
   }
   function autoListItem(r,res){
     const li=document.createElement('li');
+    if(res.status==='transcribed'){
+      const li=document.createElement('li');li.className='ok';const b=document.createElement('strong');b.textContent=r.title||'A clip';
+      li.append(b,document.createTextNode(`: “${(res.transcript||'').slice(0,90)}${(res.transcript||'').length>90?'…':''}”`));
+      const list=$('#autoResults');list.prepend(li);while(list.children.length>8)list.lastChild.remove();return;
+    }
     const ok=res.status==='understood';
     li.className=ok?'ok':'not';
     const title=document.createElement('strong');title.textContent=ok?(r.title||'Untitled'):(r.title||'A clip');
@@ -537,7 +618,8 @@
     $('#autoError').textContent='';
     if(!autoSupported()){$('#autoError').textContent='Auto-review needs Chrome or Edge on a computer.';return;}
     if(saveBlocked){$('#autoError').textContent='Resolve the save problem first (see the message at the top).';return;}
-    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked});
+    const mode=$('#autoMode').value;
+    const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked,mode});
     if(!queue.length)return;
     let stream;
     try{
@@ -552,7 +634,7 @@
       stream.getTracks().forEach(t=>t.stop());
       $('#autoError').textContent='The tab\'s sound was not shared. Press Start again and turn on "Also share tab audio".';return;
     }
-    auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,cap:Number($('#autoCap').value),mark:$('#autoMark').checked,
+    auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,cap:Number($('#autoCap').value),mark:mode==='details'&&$('#autoMark').checked,mode,
       chunks:[],recording:false};
     $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
     $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
@@ -577,7 +659,10 @@
         if(res.reason==='SHARING_STOPPED'||res.reason==='STOPPED')break;  // nothing saved for a clip cut short
         if(res.stopRun){stopReason=res.message;break;}
         const i=state.records.findIndex(x=>x.id===r.id);if(i<0)continue;
-        state.records[i]=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
+        let next=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
+        // The library is one saved file of at most 2 MB: keep long transcripts short when it is nearly full.
+        if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
+        state.records[i]=next;
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
         autoListItem(state.records[i],res);
         commit();await persist();
@@ -587,12 +672,12 @@
       }
     }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
     finally{
-      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally;
+      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed;
       autoCounts();
       autoCleanup();
       $('#autoStart').hidden=false;$('#autoStop').hidden=true;$('#autoHint').textContent='';
       if(done)$('#autoBar').style.width='100%';
-      autoSay((stopReason||(done?'Done.':ended?'Tab sharing stopped, so auto-review stopped.':'Stopped.'))+` ${t.understood||0} filled in, ${t.empty||0} nothing heard or seen, ${t.unavailable||0} would not play, ${t.failed||0} failed.`+(t.understood?' Filter Discoveries by "Auto-reviewed" to check them.':''));
+      autoSay((stopReason||(done?'Done.':ended?'Tab sharing stopped, so auto-review stopped.':'Stopped.'))+` ${t.understood||0} filled in, ${t.transcribed?t.transcribed+' transcribed, ':''}${t.empty||0} nothing heard or seen, ${t.unavailable||0} would not play, ${t.failed||0} failed.`+(t.understood?' Filter Discoveries by "Auto-reviewed" to check them.':'')+(t.transcribed?' Transcripts show in Review clips and are searchable.':'')+(trimmed?' Your library is nearly full, so the last transcripts were kept short.':''));
       $('#autoStart').textContent='Start again';
       render();
     }
@@ -621,14 +706,30 @@
     const g=c.getContext('2d');shots.forEach((s,i)=>g.drawImage(s,i*270,0));
     return c.toDataURL('image/jpeg',0.82);
   }
+  // The recorded sound as base64 WAV pieces of at most 55 seconds, quiet pieces left out.
   function autoAudio(){
-    const total=auto.chunks.reduce((n,c)=>n+c.length,0);if(!total)return '';
+    const total=auto.chunks.reduce((n,c)=>n+c.length,0);if(!total)return [];
     const all=new Float32Array(total);let at=0;for(const c of auto.chunks){all.set(c,at);at+=c.length;}
-    const pcm=C.downsample(all,auto.ctx.sampleRate,16000);
-    if(C.loudness(pcm)<0.002)return '';
-    const bytes=C.wavBytes(pcm,16000);let bin='';
-    for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
-    return btoa(bin);
+    auto.chunks=[];
+    const pcm=C.downsample(all,auto.ctx.sampleRate,16000),out=[];
+    for(const [a,b] of C.pieces(pcm.length,16000,55)){
+      const part=pcm.subarray(a,b);if(part.length<16000*0.8||C.loudness(part)<0.002)continue;
+      const bytes=C.wavBytes(part,16000);let bin='';
+      for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
+      out.push(btoa(bin));
+    }
+    return out;
+  }
+  async function autoPost(path,body){
+    let res,data;
+    try{res=await fetch('/api/'+path,{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      data=await res.json().catch(()=>({}));}
+    catch(_){return {status:'failed',reason:'NETWORK'};}
+    if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
+    if(res.status===429)return {stopRun:true,message:data.error||"Today's auto-review allowance is used up. Continue tomorrow."};
+    if(res.status===503)return {stopRun:true,message:'Auto-review is not set up on the server yet (it needs the AI binding; see the README).'};
+    if(!data.status)return {status:'failed',reason:'SERVER_'+res.status};
+    return data;
   }
   // Play one clip; resolve with what the Worker made of it (or why not).
   function autoPlay(r){
@@ -694,20 +795,26 @@
     if(played.reason==='STOPPED_BY_PERSON')return {reason:'STOPPED'};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
       return {status:'unavailable',reason:played.reason==='STALLED'?'STALLED':played.reason};
-    const audio=autoAudio(),image=autoGrid(played.shots);
-    if(!audio&&!image)return {status:'empty',reason:'NOTHING_TO_READ'};
+    // 1. What was said: each piece of sound through the speech-to-text model.
+    const parts=autoAudio(),words=[];let listenFailed=false;
+    for(let i=0;i<parts.length;i++){
+      autoSay(parts.length>1?`Turning the sound into words (part ${i+1} of ${parts.length})…`:'Turning the sound into words…');
+      const heard=await autoPost('transcribe',{audio:parts[i]});
+      if(heard.stopRun)return heard;
+      if(heard.status==='transcribed')words.push(heard.text);else if(heard.status==='failed')listenFailed=true;
+    }
+    const transcript=words.join(' ').trim().slice(0,4000);
+    if(auto.mode==='transcript'){
+      if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript};
+      return listenFailed?{status:'failed',reason:'AI_FAILED'}:{status:'empty',reason:'NOTHING_SAID'};
+    }
+    // 2. What it is about: the transcript and the screenshots.
+    const image=autoGrid(played.shots);
+    if(!transcript&&!image)return listenFailed?{status:'failed',reason:'AI_FAILED'}:{status:'empty',reason:'NOTHING_TO_READ'};
     autoSay('Working out what it is about…');
-    let res,data;
-    try{
-      res=await fetch('/api/understand',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
-        body:JSON.stringify({audio,image,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))})});
-      data=await res.json().catch(()=>({}));
-    }catch(_){return {status:'failed',reason:'NETWORK'};}
-    if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
-    if(res.status===429)return {stopRun:true,message:data.error||"Today's auto-review allowance is used up. Continue tomorrow."};
-    if(res.status===503)return {stopRun:true,message:'Auto-review is not set up on the server yet (it needs the AI binding; see the README).'};
-    if(!data.status)return {status:'failed',reason:'SERVER_'+res.status};
-    return data;
+    const data=await autoPost('understand',{transcript,image,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
+    if(data.stopRun)return data;
+    return {...data,transcript};
   }
   function stopAuto(){if(auto){auto.stop=true;autoSay('Stopping…');auto.finishClip?.('STOPPED_BY_PERSON');}}
   function initAuto(){
@@ -716,6 +823,7 @@
     $('#autoStart').addEventListener('click',startAuto);
     $('#autoStop').addEventListener('click',stopAuto);
     for(const id of ['autoScope','autoCap'])$('#'+id).addEventListener('change',autoEstimate);
+    $('#autoMode').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     $('#autoRedo').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     const close=()=>{if(auto&&!confirm('Stop auto-review and close?'))return;stopAuto();if(!auto)dlg.close();else{const wait=setInterval(()=>{if(!auto){clearInterval(wait);dlg.close();}},200);}};
     $('#autoClose').addEventListener('click',close);
@@ -732,7 +840,7 @@
       <input class="cat-emoji" data-field="emoji" value="${html(c.emoji)}" aria-label="Emoji for ${html(c.name)}" maxlength="8">
       <input class="cat-name" data-field="name" value="${html(c.name)}" aria-label="Category name" maxlength="40">
       <input class="cat-words" data-field="words" value="${html(c.words.join(', '))}" aria-label="Sort words for ${html(c.name)}" placeholder="sort words, separated by commas">
-      <span class="cat-count">${counts[c.name]||0} clip${counts[c.name]===1?'':'s'}</span>
+      <button type="button" class="cat-count link-count" data-cat-select="${html(c.name)}" ${counts[c.name]?'':'disabled'} title="Select these clips in Discoveries (to delete or move them)">${counts[c.name]||0} clip${counts[c.name]===1?'':'s'}</button>
       <span class="cat-actions"><button type="button" data-cat-move="-1" ${i===0?'disabled':''} aria-label="Move up">↑</button><button type="button" data-cat-move="1" ${i===list.length-1?'disabled':''} aria-label="Move down">↓</button>
       <select data-cat-merge aria-label="Merge ${html(c.name)} into another category"><option value="">Merge into…</option>${list.filter(o=>o.id!==c.id).map(o=>`<option value="${html(o.name)}">${html(o.name)}</option>`).join('')}</select>
       <button type="button" class="danger" data-cat-delete aria-label="Delete ${html(c.name)}">Delete</button></span></div>`).join(''):'<p class="hint">No categories yet. Add one below, or add a starter set.</p>';
@@ -759,6 +867,7 @@
     if(t.dataset.field==='words'){state.categories=C.normalizeCategories(categoryList().map(x=>x.id===c.id?{...x,words:t.value}:x));commit();}
   }
   function settingsClick(evt){
+    const pickCat=evt.target.closest('[data-cat-select]');if(pickCat){selectCategory(pickCat.dataset.catSelect);return;}
     const t=evt.target.closest('button');if(!t)return;
     const row=t.closest('[data-cat]');
     if(row&&t.dataset.catMove){
@@ -820,6 +929,7 @@
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
     initReview();
     initAuto();
+    initBulk();
     $('#analyzeLinks').addEventListener('click',analyzeLinks);
     $('#viewEnriched').addEventListener('click',viewEnriched);
     $('#settingsPage').addEventListener('change',settingsChange);

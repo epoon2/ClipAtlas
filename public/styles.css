@@ -69,3 +69,19 @@
 .auto-error{color:#a43b3b!important;font-weight:650}.auto-error:empty{display:none}
 .auto-dialog .modal-footer p{color:#8c9991}
 @media(max-width:760px){.auto-wrap{padding:14px}}
+.head-actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn-danger{min-height:39px;padding:10px 17px;border-radius:9px;font-weight:750;border:1px solid #f0c9c5;background:#fff5f4;color:#a3443a}.btn-danger:hover{background:#fdecea}
+.bulk-bar{position:sticky;bottom:14px;z-index:5;margin-top:16px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:#fff;border:1px solid #d7e3dc;border-radius:14px;padding:10px 12px;box-shadow:0 10px 35px #153a3b26}
+.bulk-bar[hidden]{display:none}.bulk-bar strong{color:#173b3c;margin-right:4px}.bulk-gap{flex:1}
+.bulk-bar select{min-height:39px;border:1px solid #e1e9e3;border-radius:9px;padding:0 10px;background:#fff;color:#24464a;max-width:220px}
+.clip-card{position:relative}.clip-card.selecting{cursor:pointer}.clip-card.picked{outline:3px solid #4b9989;outline-offset:-1px}
+.pick{position:absolute;top:10px;left:10px;z-index:2;background:#fff;border-radius:8px;padding:6px;display:flex;box-shadow:0 2px 8px #153a3b22}
+.pick input{width:18px;height:18px;margin:0;cursor:pointer}
+.clip-card.selecting .clip-emoji{padding-left:34px}
+.link-count{border:0;background:none;padding:0;color:#3f7f70;font-weight:750;text-decoration:underline;cursor:pointer;font-size:12px;text-align:left}.link-count:disabled{color:#9aa99f;text-decoration:none;cursor:default}
+.toast.with-action{pointer-events:auto}.toast-action{border:0;background:#b8eee0;color:#133338;font-weight:800;border-radius:7px;padding:4px 10px;margin-left:6px}
+.review-heard{background:#f4f8f5;border:1px solid #e1ece5;border-radius:10px;padding:12px 14px}.review-heard[hidden]{display:none}
+.heard-head{display:flex;justify-content:space-between;align-items:center;font-size:10px;font-weight:850;letter-spacing:.1em;color:#6e847c;margin-bottom:6px}
+.review-heard p{margin:0 0 10px;font-size:13px;line-height:1.55;color:#294b49;max-height:160px;overflow:auto;white-space:pre-wrap}.review-heard p:last-child{margin-bottom:0}
+@media(max-width:600px){.bulk-gap{display:none}.bulk-bar{bottom:8px}.bulk-bar select{max-width:100%;flex:1}}
+.toast{z-index:60}body.selecting .toast{bottom:96px}
