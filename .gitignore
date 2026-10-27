@@ -1,0 +1,28 @@
+# Local dependencies and builds
+node_modules/
+.wrangler/
+dist/
+coverage/
+*.log
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+
+# Local TikTok exports and backups
+user-data/
+backups/
+TikTok*.json
+TikTok*.csv
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#122d32" />
+  <meta name="description" content="Organize saved TikTok discoveries into a searchable travel and ideas library." />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'" />
+  <title>ClipAtlas — Save it. Find it. Go.</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="core.js" defer></script>
+  <script src="cloud.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <section id="authGate" class="auth-gate" aria-label="Sign in to ClipAtlas">
+    <div class="auth-card"><div class="auth-brand">✦ <strong>ClipAtlas</strong></div>
+      <h1 id="authHeading">Welcome back</h1><p class="auth-subtitle">Your own private saved-video library, available on all your devices.</p>
+      <form id="authForm"><label class="field" id="displayWrap" hidden><span>YOUR NAME</span><input id="authDisplay" autocomplete="name" maxlength="60"></label>
+      <label class="field"><span>EMAIL</span><input id="authEmail" type="email" autocomplete="email" required maxlength="250"></label>
+      <label class="field"><span>PASSWORD</span><input id="authPassword" type="password" autocomplete="current-password" required minlength="12" maxlength="128"></label>
+      <p id="authError" class="auth-error" role="alert"></p><button type="submit" id="authSubmit" class="btn-primary full">Sign in</button></form>
+      <button id="authToggle" class="auth-toggle" type="button">Create a free account</button>
+      <p class="auth-fine">A ClipAtlas account is separate from TikTok. Never enter your TikTok password here.</p>
+    </div>
+  </section>
+  <div class="app-shell" id="appShell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">✦</div><div><strong>ClipAtlas</strong><small>your saved-world index</small></div></div>
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav aria-label="Main navigation" class="nav">
+        <button data-tab="library" class="nav-link active"><span>▦</span> Discoveries <span class="nav-count" id="navCount">0</span></button>
+        <button data-tab="itinerary" class="nav-link"><span>◷</span> Itinerary</button>
+        <button data-tab="import" class="nav-link"><span>↥</span> Import & backup</button>
+      </nav>
+      <div class="sidebar-label space-top">COLLECTIONS <button id="newCollection" class="text-icon" aria-label="Add collection" title="Add collection">＋</button></div>
+      <div class="collections" id="collectionNav"></div>
+      <div class="sidebar-bottom"><div class="privacy-symbol">◉ <span>PRIVATE CLOUD LIBRARY</span></div><p>Saved securely to your account, not shared with other users. No TikTok login required.</p><button class="link-button" id="exportSide">Export a backup ↗</button><button class="link-button" id="signOut" type="button">Sign out</button></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div class="breadcrumbs">PERSONAL ARCHIVE <span>/</span> <span id="crumb">DISCOVERIES</span></div><div class="status-pill"><span class="green-dot"></span><span id="saveStatus">Saved to your account</span></div></header>
+      <section id="libraryPage" class="page active">
+        <div class="hero"><div class="eyebrow">TURN SCROLLING INTO SOMETHING USEFUL</div><h1>All the places you saved.<br><em>Finally, somewhere to find them.</em></h1><p>Collect the clips. Capture the details. Plan the actual trip.</p><div class="hero-actions"><button class="btn-primary" id="addButton">＋ Add a TikTok</button><button class="btn-light" data-tab="import">↥ Import your favorites</button></div><div class="hero-burst">✳</div></div>
+        <div class="stat-grid"><article class="stat"><span>Saved discoveries</span><strong id="statClips">0</strong><small>Total unique links</small></article><article class="stat"><span>Collections</span><strong id="statCollections">0</strong><small>Custom folders</small></article><article class="stat"><span>Needs details</span><strong id="statReview">0</strong><small>Ready to enrich</small></article><article class="stat"><span>Planned stops</span><strong id="statPlan">0</strong><small>Across your itinerary</small></article></div>
+        <div class="panel" id="enrichPanel" style="margin-bottom:20px"><span class="step-label">AUTOMATIC LINK ENRICHMENT</span><h3>Analyze saved TikTok links</h3><p>Fetch public captions and creator metadata, suggest categories, locations and tags. Audio and on-screen text cannot be extracted from links alone. Existing notes and reviewed records are preserved.</p><div class="stack-actions"><button class="btn-primary" id="analyzeLinks" type="button">✧ Analyze unreviewed links</button><button class="btn-light" id="cancelAnalyze" type="button" hidden>Stop analysis</button></div><p id="analyzeProgress" class="small-note" role="status" aria-live="polite">No analysis started.</p></div>
+        <div class="section-head"><div><div class="eyebrow">YOUR LIBRARY</div><h2>Discoveries <span id="filteredCount" class="inline-count">0 clips</span></h2></div><button class="btn-subtle" id="exportCsv">↓ Export CSV</button></div>
+        <div class="filter-bar"><label class="search-wrap"><span>⌕</span><input id="search" placeholder="Search places, notes, captions, tags…" type="search" autocomplete="off" /></label><select id="categoryFilter" aria-label="Filter by category"></select><select id="statusFilter" aria-label="Filter by review status"><option value="all">All statuses</option><option value="unreviewed">Needs review</option><option value="reviewed">Reviewed</option></select><select id="sortFilter" aria-label="Sort"><option value="recent">Newest saved</option><option value="oldest">Oldest saved</option><option value="title">Title A–Z</option></select></div>
+        <div class="clip-grid" id="clipGrid"></div>
+        <div class="empty" id="libraryEmpty" hidden><div class="empty-icon">✦</div><h3>No discoveries here yet</h3><p>Import TikTok favorites, or paste your first link to begin building your archive.</p><div class="empty-actions"><button class="btn-primary" data-tab="import">Import favorites</button><button class="btn-light" id="emptyAdd">Add a link</button></div></div>
+      </section>
+      <section id="itineraryPage" class="page">
+        <div class="page-intro"><div class="eyebrow">FROM SAVED TO SCHEDULED</div><h1>Your itinerary <em>starts here.</em></h1><p>Turn saved videos into a draft trip. Move stops between days, keep the source, and export a plan you can edit.</p></div>
+        <div class="itinerary-toolbar"><label class="field"><span>TRIP NAME</span><input id="tripTitle" placeholder="Taiwan 2027" /></label><label class="field small"><span>SHOW DAYS</span><select id="dayCount"><option value="3">3 days</option><option value="5">5 days</option><option value="7" selected>7 days</option><option value="10">10 days</option><option value="14">14 days</option></select></label><button class="btn-primary" id="exportPlan">↓ Export plan</button></div>
+        <p class="hint">This is an ordering board, not an optimized route. Locations and opening hours must be verified before travel.</p>
+        <div id="itineraryDays" class="days"></div>
+      </section>
+      <section id="importPage" class="page">
+        <div class="page-intro"><div class="eyebrow">BUILD THE INDEX</div><h1>Bring your saves <em>together.</em></h1><p>Import a TikTok data export or a spreadsheet you made yourself. Existing notes and collections are preserved when a duplicate link appears.</p></div>
+        <div class="import-layout"><div class="panel"><span class="step-label">01 / IMPORT TIKTOK DATA</span><h3>Choose your export</h3><p>TikTok: Profile → ☰ → Settings and privacy → Account → Download your data. Choose JSON. Unzip the downloaded file and select the JSON inside.</p><label class="drop" id="dropZone"><span class="drop-icon">↥</span><strong>Drop a .json or .csv file here</strong><small>or click to browse · up to 30 MB</small><input id="fileImport" type="file" accept=".json,.csv,application/json,text/csv" /></label><p class="small-note">TikTok's official Favorites export typically contains links and dates. It does not include the original collection-folder assignments or video/audio. You'll add those here.</p><div class="import-feedback" id="importFeedback" role="status" aria-live="polite"></div></div>
+          <div class="panel"><span class="step-label">02 / QUICK CAPTURE</span><h3>Paste saved video links</h3><p>One TikTok URL per line. Useful for manually rebuilding a specific collection.</p><label class="field"><span>COLLECTION TO ASSIGN (OPTIONAL)</span><input id="bulkCollection" placeholder="e.g. Taiwan food" /></label><textarea id="bulkLinks" rows="7" placeholder="https://www.tiktok.com/@creator/video/…\nhttps://vm.tiktok.com/…"></textarea><button class="btn-primary full" id="bulkImport">Add links to library</button></div>
+          <div class="panel"><span class="step-label">03 / YOUR BACKUP</span><h3>Keep a portable copy</h3><p>Download all saved links, manually written details, collections and itinerary days as one JSON backup. Your saved data is synchronized to your ClipAtlas account.</p><div class="stack-actions"><button class="btn-light full" id="importLocal" type="button">↑ Import this browser’s old local library</button><button class="btn-light full" id="exportBackup">↓ Download full JSON backup</button><button class="btn-light full" id="downloadTemplate">↓ Download CSV template</button><button class="btn-light full" id="exportCsvImport">↓ Export library CSV</button></div><p class="small-note">Importing a ClipAtlas backup replaces your library only after confirmation. Ordinary TikTok or CSV imports merge with it instead.</p></div>
+          <div class="panel accent-panel"><span class="step-label">WHAT THE PLANNER KNOWS</span><h3>Source-first, not guess-first.</h3><p>A TikTok favorite alone doesn't reveal a restaurant name, location or opening hours. This version supports editing those details and suggesting a category from pasted caption text. It never fabricates addresses or auto-downloads videos.</p><div class="feature-line">✓ Duplicate video-ID detection</div><div class="feature-line">✓ Multiple collections per video</div><div class="feature-line">✓ Text-based category suggestion</div><div class="feature-line">✓ Private searchable itinerary board</div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog id="editDialog" class="edit-dialog"><form method="dialog" id="editForm"><div class="modal-heading"><div><div class="eyebrow">CLIP DETAILS</div><h2 id="modalTitle">New discovery</h2></div><button type="button" id="closeDialog" class="icon-only" aria-label="Close dialog">✕</button></div><div class="form-grid"><label class="field wide"><span>TIKTOK LINK *</span><input name="url" type="url" placeholder="https://www.tiktok.com/@…/video/…" required /></label><label class="field wide"><span>TITLE / WHY IT'S SAVED</span><input name="title" placeholder="The hidden noodle shop I want to try" /></label><label class="field"><span>CATEGORY</span><select name="category" id="formCategory"></select></label><label class="field"><span>COLLECTIONS (comma-separated)</span><input name="collections" placeholder="Taiwan food, Summer trip" /></label><label class="field"><span>PLACE / VENUE NAME</span><input name="place" placeholder="Not yet identified" /></label><label class="field"><span>CITY / REGION</span><input name="city" placeholder="Taipei" /></label><label class="field"><span>COUNTRY</span><input name="country" placeholder="Taiwan" /></label><label class="field"><span>TAGS (comma-separated)</span><input name="tags" placeholder="dessert, xinyi, night market" /></label><label class="field"><span>CREATOR (OPTIONAL)</span><input name="creator" placeholder="@account" /></label><label class="field"><span>REVIEW STATUS</span><select name="status"><option value="unreviewed">Needs review</option><option value="reviewed">Reviewed</option></select></label><label class="field wide"><span>CAPTION / TEXT FROM THE VIDEO</span><textarea name="caption" rows="3" placeholder="Paste a caption or notes from the clip. The planner can suggest a category from this text."></textarea></label><label class="field wide"><span>YOUR NOTES</span><textarea name="notes" rows="3" placeholder="What should I remember? Cost, opening hours, order suggestions, booking tips…"></textarea></label></div><div class="modal-footer"><p id="modalError" role="alert"></p><button type="button" class="btn-light" id="cancelEdit">Cancel</button><button type="submit" class="btn-primary">Save discovery</button></div></form></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

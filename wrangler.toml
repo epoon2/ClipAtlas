@@ -1,0 +1,17 @@
+name = "clipatlas-planner"
+main = "src/worker.js"
+compatibility_date = "2026-10-25"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[vars]
+REGISTRATION_ENABLED = "true"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "clipatlas-db"
+database_id = "aeb53b56-03db-4e1b-a4c0-cbaa9b381ac5"
+migrations_dir = "migrations"
