@@ -1028,21 +1028,64 @@
       meta.slides?`${meta.slides} slide${meta.slides===1?'':'s'}`:meta.shots?`${read}${meta.shots} screenshot${meta.shots===1?'':'s'}${read?' read':''}`:'',
       clock(meta.ms),C.speedLabel(meta.rate),meta.tries>1?'played on the second try':'',auto&&auto.provider==='gemini'&&res.via?res.via:''].filter(Boolean).join(' · ');
   }
-  function autoListItem(r,res,meta){
-    const li=document.createElement('li');
+  // While a clip's AI work runs (during the next clip), its line says so; the result then takes its place.
+  function autoPending(r){
+    const li=document.createElement('li');li.className='pending';
+    const b=document.createElement('strong');b.textContent=r.title||r.place||'A clip';
+    li.append(b,document.createTextNode(` · reading it with ${auto.provider==='gemini'&&!auto.geminiOff?'Gemini':'Cloudflare'}…`));
+    $('#autoResults').prepend(li);return li;
+  }
+  // One clip's result in the run's list. A clip that was filled in opens to show what was found
+  // (the newest one open, the earlier ones folded); the others are one line.
+  function autoListItem(before,r,res,meta,pending){
+    const list=$('#autoResults'),li=document.createElement('li');
     const facts=document.createElement('small');facts.textContent=autoFacts(res,meta);
-    const list=$('#autoResults');
+    const strong=t=>{const b=document.createElement('strong');b.textContent=t;return b;};
     if(res.status==='transcribed'){
-      li.className='ok';const b=document.createElement('strong');b.textContent=r.title||'A clip';
-      li.append(b,document.createTextNode(`: “${(res.transcript||'').slice(0,90)}${(res.transcript||'').length>90?'…':''}”`),facts);
-      list.prepend(li);while(list.children.length>8)list.lastChild.remove();return;
+      li.className='ok';
+      li.append(strong(r.title||'A clip'),document.createTextNode(`: “${(res.transcript||'').slice(0,90)}${(res.transcript||'').length>90?'…':''}”`),facts);
+    }else if(res.status!=='understood'){
+      li.className='not';
+      li.append(strong(r.title||'A clip'),document.createTextNode(`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}${res.detail?' ('+res.detail+')':''}`),facts);
+    }else{
+      li.className='ok';
+      const n=(r.places||[]).length,d=document.createElement('details'),sum=document.createElement('summary'),body=document.createElement('div');
+      sum.append(strong(r.title||'Untitled'),document.createTextNode(` → ${emojiFor(r.category)} ${r.category}${n?` · 📍 ${plural(n,'place','places')}`:''}${res.heard||res.seen?' (from '+[res.heard&&'what was said',res.seen&&'what was shown'].filter(Boolean).join(' and ')+')':''}`));
+      body.className='found';body.innerHTML=autoFound(before,r,res);
+      d.append(sum,body);li.append(d,facts);
+      for(const old of list.querySelectorAll('details[data-auto-open]')){old.open=false;delete old.dataset.autoOpen;}
+      d.open=true;d.dataset.autoOpen='1';
     }
-    const ok=res.status==='understood';
-    li.className=ok?'ok':'not';
-    const title=document.createElement('strong');title.textContent=ok?(r.title||'Untitled'):(r.title||'A clip');
-    li.append(title,document.createTextNode(ok?` → ${emojiFor(r.category)} ${r.category}${res.heard||res.seen?' (from '+[res.heard&&'what was said',res.seen&&'what was shown'].filter(Boolean).join(' and ')+')':''}`
-      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}${res.detail?' ('+res.detail+')':''}`),facts);
-    list.prepend(li);while(list.children.length>8)list.lastChild.remove();
+    if(pending&&pending.isConnected)pending.replaceWith(li);else list.prepend(li);
+    while(list.children.length>40)list.lastChild.remove();
+  }
+  // What auto-review found in one clip and what it changed (``before``: the clip as it was).
+  function autoFound(before,r,res){
+    const out=[],cut=(t,n)=>{t=String(t||'').replace(/\s+/g,' ').trim();return t.length>n?t.slice(0,n)+'…':t;};
+    const where=[r.place,[r.city,r.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+    if(where)out.push(`<p class="found-where">📍 ${html(where)}</p>`);
+    if(res.summary)out.push(`<p class="found-summary">${html(res.summary)}</p>`);
+    const places=r.places||[];
+    if(places.length)out.push(`<ul class="found-places">${places.map(p=>`<li>${C.PLACE_EMOJI[C.placeType(p.type)]} <b>${html(p.name)}</b>${p.city?' · '+html(p.city):''}${p.note?' — '+html(p.note):''}</li>`).join('')}</ul>`
+      +(r.placesBy==='person'?'<p class="found-note">These are the places as you edited them; auto-review leaves them as they are.</p>':''));
+    for(const [label,text,n] of [['Heard',res.transcript,280],['On screen',res.onScreen,200],['Seen',res.shows,160]])
+      if(cut(text,n))out.push(`<p class="found-quote"><span>${label}</span> “${html(cut(text,n))}”</p>`);
+    const tags=(r.tags||[]).filter(t=>!(before.tags||[]).includes(t));
+    if(tags.length)out.push(`<p class="found-tags">${tags.map(t=>'#'+html(t)).join(' ')}</p>`);
+    const changed=[],kept=[];
+    for(const [k,label] of [['title','title'],['category','category'],['place','place'],['city','city'],['country','country'],['creator','creator'],['caption','text from the video']]){
+      if(String(before[k]||'')!==String(r[k]||''))changed.push(label);
+      else if(['title','place','city','country'].includes(k)&&before[k]&&res[k]&&String(res[k]).toLowerCase()!==String(before[k]).toLowerCase())kept.push(label);
+    }
+    const had=new Set((before.places||[]).map(p=>p.name.toLowerCase())),added=places.filter(p=>!had.has(p.name.toLowerCase())).length;
+    if(added)changed.push(plural(added,'new place','new places'));
+    if(tags.length)changed.push(plural(tags.length,'tag','tags'));
+    out.push(`<p class="found-changes">${changed.length?'Filled in: '+html(changed.join(', '))+'.':'Nothing new to fill in.'}${kept.length?' Kept yours: '+html(kept.join(', '))+'.':''}</p>`);
+    // Only Unsorted clips are moved by themselves; for the others, the AI's choice is offered.
+    const said=C.categoryName(res.category);
+    if(said&&said!=='Unsorted'&&r.category!=='Unsorted'&&r.category!==said&&categoryList().some(c=>c.name===said))
+      out.push(`<p class="found-suggest">The AI would file it under ${html(emojiFor(said))} ${html(said)}; it stays in ${html(r.category)}. <button type="button" class="link-inline" data-action="use-category" data-id="${html(r.id)}" data-category="${html(said)}">Move it to ${html(said)}</button></p>`);
+    return out.join('');
   }
   async function startAuto(){
     if(auto)return;
@@ -1082,16 +1125,18 @@
       const node=new AudioWorkletNode(ctx,'clipatlas-recorder');auto.node=node;
       const silent=ctx.createGain();silent.gain.value=0;
       source.connect(node);node.connect(silent).connect(ctx.destination);
-      node.port.onmessage=e=>{if(auto&&auto.recording)auto.chunks.push(e.data);};
+      node.port.onmessage=e=>{if(!auto||!auto.recording)return;const d=e.data;auto.chunks.push(d);
+        let sum=0;for(let i=0;i<d.length;i+=4)sum+=d[i]*d[i];if(sum/Math.max(1,d.length/4)>1e-4)auto.loudAt=Date.now();};
       if(ctx.state!=='running')await ctx.resume();
       const video=document.createElement('video');video.muted=true;video.playsInline=true;
       video.srcObject=new MediaStream(stream.getVideoTracks());await video.play();auto.video=video;
       try{auto.wake=await navigator.wakeLock?.request('screen');}catch(_){/* the screen may sleep; capture still works while the tab is open */}
       // Save one clip's result. False when the run has to stop.
-      const keep=async(r,res,meta)=>{
-        if(res.stopRun){stopReason=res.message;auto.stop=true;return false;}
-        const i=state.records.findIndex(x=>x.id===r.id);if(i<0)return true;
-        let next=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
+      const keep=async(r,res,meta,pending)=>{
+        if(res.stopRun){pending?.remove();stopReason=res.message;auto.stop=true;return false;}
+        const i=state.records.findIndex(x=>x.id===r.id);if(i<0){pending?.remove();return true;}
+        const before=state.records[i];
+        let next=C.applyUnderstanding(before,res,{markReviewed:auto.mark});
         // The library is one saved file of at most 2 MB: keep long transcripts short when it is nearly full.
         if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
         state.records[i]=next;
@@ -1101,7 +1146,7 @@
         if(res.use){auto.neurons+=res.use.neurons;auto.useClips++;if(res.use.partial)auto.usePartial=true;}
         if(meta&&C.speedMissing(auto.speed,meta.rate)&&!auto.speedWarned){auto.speedWarned=true;
           autoNote('Clips are playing at normal speed: the ClipAtlas playback speed extension does not seem to be on (see the README, "Playback speed").');}
-        autoListItem(state.records[i],res,meta);
+        autoListItem(before,state.records[i],res,meta,pending);
         commit();await persist();
         if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';auto.stop=true;return false;}
         auto.failsInRow=res.status==='failed'?auto.failsInRow+1:0;
@@ -1112,12 +1157,12 @@
       // Each clip's AI work runs while the next clips play; results are saved in order.
       // At most two clips wait for their AI work, so a slow AI step cannot pile up.
       let chain=Promise.resolve(true);const waiting=[];
-      const later=(r,work,meta)=>{
+      const later=(r,work,meta,pending=null)=>{
         const item={finished:false};
         item.promise=chain=chain.then(async go=>{
-          if(!go){item.finished=true;return false;}
+          if(!go){pending?.remove();item.finished=true;return false;}
           const res=await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)}));
-          const more=await keep(r,res,meta);item.finished=true;
+          const more=await keep(r,res,meta,pending);item.finished=true;
           if(!more)auto.finishClip?.('STOPPED_BY_RUN');  // cut the clip that is playing now
           return more;
         });
@@ -1133,7 +1178,7 @@
         const meta={ms:Date.now()-clipStarted-(auto.pausedMs-pausedBefore),shots:got.played?got.played.shots.length:0,slides:got.played?got.played.slides:0,
           rate:got.played?got.played.rate:0,tries:got.played?got.played.tries:0};
         if(got.done&&(got.done.reason==='SHARING_STOPPED'||got.done.reason==='STOPPED'))break;  // nothing saved for a clip cut short
-        later(r,got.done?Promise.resolve(got.done):autoAnalyze(r,got),meta);
+        later(r,got.done?Promise.resolve(got.done):autoAnalyze(r,got),meta,got.done?null:autoPending(r));
       }
       if(waiting.some(i=>!i.finished))autoSay('Finishing the last clips…');
       await chain;
@@ -1382,7 +1427,7 @@
           if(!times&&dur>0){length=Math.min(dur,MAX_VIDEO);times=C.shotTimes(length);}
           // Not in the first 1.5 seconds: the shared tab can still show the clip before.
           while(times&&times.length&&t>=times[0]&&Date.now()-ready>=1500){times.shift();shoot();}
-          if(!paused){const fast=C.speedLabel(rate());autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s${fast?' · '+fast:''}`);}
+          if(!paused){const fast=C.speedLabel(rate());autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s${fast?' · '+fast:''} · 📸 ${plural(shots.length,'screenshot','screenshots')} · ${Date.now()-(auto.loudAt||0)<1500?'🔊 hearing sound':'🔇 quiet'}`);}
           if(t>=length-0.5)finish('ENDED');
         }
         else if(d.type==='onPlayerError'||d.type==='onError'){
@@ -1632,6 +1677,9 @@
       if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
       else if(kind==='read-item')readItem(id);
+      else if(kind==='use-category'){const r=state.records.find(x=>x.id===id),cat=action.dataset.category;
+        if(r&&categoryList().some(c=>c.name===cat)){state.records[state.records.indexOf(r)]={...r,category:cat,autoSorted:undefined,updatedAt:new Date().toISOString()};commit();
+          const p=action.closest('.found-suggest');if(p)p.textContent=`Moved to ${emojiFor(cat)} ${cat}.`;}}
       else if(kind==='plan')addToPlan(id);
       else if(kind==='delete'){
         const r=state.records.find(x=>x.id===id);

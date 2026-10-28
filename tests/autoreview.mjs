@@ -203,6 +203,12 @@ check('and shows the real error of a step that fails', /^✗ Listen.*listen: 500
 AI.broken = false;
 asked.length = 0;
 
+// Record what the run shows as it goes: the live line, and the "reading…" lines in the list.
+await page.evaluate(() => { window.__said = []; window.__pending = [];
+  const now = document.getElementById('autoNow'), list = document.getElementById('autoResults');
+  new MutationObserver(() => window.__said.push(now.textContent)).observe(now, { childList: true, characterData: true, subtree: true });
+  new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.classList && n.classList.contains('pending')) window.__pending.push(n.textContent); })
+    .observe(list, { childList: true }); });
 await page.click('#autoStart');
 // Switching away pauses it; coming back carries on.
 const setHidden = hidden => page.evaluate(h => {
@@ -229,6 +235,15 @@ check('each clip says what was heard and read, how long it took, the speed, and 
   facts.some(f => /^no speech heard · 4 slides · 0:(0\d|1\d)$/.test(f)), JSON.stringify(facts));
 check('a passing player error is tried once more; a removed clip is not', loads['7000000000000000001'] === 2 && loads['7000000000000000004'] === 1,
   JSON.stringify(loads));
+const said = await page.evaluate(() => window.__said), pendingLines = await page.evaluate(() => window.__pending);
+check('while a clip plays, the line counts its screenshots and says when sound is coming in',
+  said.some(t => /^Watching and listening · \d+s of \d+s.* · 📸 \d+ screenshots? · 🔊 hearing sound$/.test(t)), JSON.stringify(said.filter(t => /📸/.test(t)).slice(-3)));
+check('a clip being read says so in the list, then its result takes the place of that line',
+  pendingLines.length === 3 && pendingLines.every(t => / · reading it with Cloudflare…$/.test(t)) && await page.locator('#autoResults li.pending').count() === 0, JSON.stringify(pendingLines));
+const openFound = await page.$$eval('#autoResults details', els => els.map(d => [d.open, d.querySelector('.found').textContent]));
+check('the newest filled-in clip opens to show what was found; the earlier ones fold',
+  openFound.length === 3 && openFound[0][0] && !openFound[1][0] && !openFound[2][0] && /📍 .*Taipei, Taiwan/.test(openFound[0][1]) && /Filled in: title, category/.test(openFound[0][1]),
+  JSON.stringify(openFound));
 check('the run finishes and says what happened', /^Done\. 3 filled in, 0 nothing heard or seen, 1 would not play, 0 failed\./.test(summary), summary);
 await page.screenshot({ path: process.env.SHOT || '/tmp/clipatlas-auto.png' });
 
@@ -352,6 +367,11 @@ await page.waitForFunction(() => !document.getElementById('aiCheckBtn').disabled
 const geminiCheck = (await page.$$eval('#aiCheckOut li', els => els.map(e => e.textContent))).find(t => /Gemini/.test(t)) || '';
 check('the setup check tries Gemini too', /^✓ Gemini \(all three in one\).*gemini-3\.5-flash-lite: read "BEST BEEF NOODLES TAIPEI"/.test(geminiCheck), geminiCheck);
 await page.click('#autoClose');
+// One clip put in another category by hand: a redo keeps it there and offers the AI's choice.
+await page.locator('#clipGrid .clip-card', { has: page.locator('.analysis-badge.auto-understood') }).first().locator('[data-action="edit"]').click();
+const otherCategory = await page.$$eval('#formCategory option', os => os.map(o => o.value).find(v => v && !['Food', 'Unsorted'].includes(v)));
+await page.selectOption('#formCategory', otherCategory);
+await page.click('#editForm button[type="submit"]');
 gemini.calls.length = 0; gemini.busyOnce = true;
 const cfBefore = asked.length;
 const viaGemini = await runAuto();
@@ -363,6 +383,18 @@ check('each request carried the whole clip\'s sound (16 kHz WAV) and its screens
   new Set(gemini.calls.filter(c => c.seconds > 1.5 && c.loudness > 0.01).map(c => c.images.length)).size === 2 &&
   gemini.calls.some(c => !c.seconds && c.images.length === 2) &&
   gemini.calls.every(c => c.key === 'test-key' && c.categories.includes('Food') && /Its sound is (not )?attached/.test(c.prompt)), JSON.stringify(gemini.calls.map(c => [c.seconds.toFixed(1), c.images.length])));
+const gFound = await page.$$eval('#autoResults details .found', els => els.map(e => e.textContent));
+check('what Gemini found shows in the list: its places with their notes, what was heard, and the new places',
+  gFound.length === 3 && gFound.every(t => /Lin Dong Fang · Taipei — beef noodle soup/.test(t) && /Raohe Night Market/.test(t) && /Filled in: .*2 new places/.test(t)) &&
+  gFound.filter(t => /Heard “the best beef noodles in taipei”/.test(t)).length === 2, JSON.stringify(gFound));
+const offer = page.locator('#autoResults .found-suggest');
+check('a clip in another category: the AI\'s choice is offered, not made', await offer.count() === 1 && new RegExp(`would file it under 🍜 Food; it stays in ${otherCategory}`).test(await offer.textContent()),
+  await offer.count() ? await offer.textContent() : 'none');
+await page.evaluate(() => { const d = document.querySelector('#autoResults .found-suggest')?.closest('details'); if (d) d.open = true; });
+if (await offer.count()) await offer.locator('button').click();
+const cats = await page.$$eval('#clipGrid .clip-card .category', els => els.map(e => e.textContent));
+check('… and one click moves it', /^Moved to 🍜 Food\.$/.test(await offer.textContent()) && !cats.includes(otherCategory) && cats.filter(c => c === 'Food').length === 3,
+  await offer.textContent() + ' ' + JSON.stringify(cats));
 check('the time line counts the Gemini requests', / · Gemini: 3 requests \(your daily limit is in Google AI Studio\)$/.test(await page.textContent('#autoTime')), await page.textContent('#autoTime'));
 await page.click('#autoClose');
 await page.fill('#search', 'Lin Dong Fang');
