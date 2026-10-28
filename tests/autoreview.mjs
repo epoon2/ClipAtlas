@@ -418,7 +418,7 @@ await page.click('#autoClose');
 
 // ---- Ask about the clips: Gemini's stronger model reads them all; the answer cites them and is kept
 resetGeminiForTests();   // a new day: the models used up above have requests again
-await page.click('#askPanel summary');
+check('Ask is open above the cards', await page.$eval('#askPanel', d => d.open));
 await page.fill('#askInput', 'Where should I eat?');
 await page.click('#askButton');
 await page.waitForSelector('.ask-item');

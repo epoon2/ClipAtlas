@@ -574,3 +574,32 @@ test('the export gives each place its address and a map link; Ask gets the addre
  assert.match(req.contents[0].parts[0].text,/"address": "its street address only if said or shown/);
  assert.match(C.geminiTextRequest({kind:'link',body:'x'}).contents[0].parts[0].text,/"address": "its street address only if the text gives it/);
 });
+
+// ---- One stop per place; the places by city as research
+test('a planned clip that now lists its places gets one stop per place, on its day; gone stops are dropped',()=>{
+ let n=0;const id=()=>'stop-'+(++n);
+ const a=C.createRecord({url:long,title:'Shopping guide',places:[{name:'Wanted Shop',type:'shopping'},{name:'Popmart',type:'shopping'}]});
+ const b=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'No places yet'});
+ const plan=[{id:'s1',recordId:a.id,day:2,note:'after lunch'},{id:'s2',recordId:b.id,day:1,note:''},{id:'s3',recordId:'gone',day:1,note:''}];
+ const out=C.placeStops(plan,[a,b],id);
+ assert.deepEqual(out.map(p=>[p.recordId,p.placeId||'',p.day,p.note]),[[a.id,a.places[0].id,2,'after lunch'],[a.id,a.places[1].id,2,''],[b.id,'',1,'']]);
+ assert.deepEqual(C.placeStops(out,[a,b],id),out,'nothing more to do the second time');
+});
+test('places by city: each place once with every clip that names it, most-recommended first; clips naming none counted',()=>{
+ const r1=C.createRecord({url:long,title:'Night markets',places:[{name:'Raohe Night Market',type:'food',city:'Taipei',country:'Taiwan',note:'pepper buns'},{name:'Shilin Night Market',type:'food',city:'Taipei'}]});
+ const r2=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Taipei in a day',places:[{name:'raohe night-market',type:'food',city:'taipei',note:'Pepper buns',address:'Raohe St, Songshan'},{name:'Taipei 101',type:'sightseeing',city:'Taipei'}]});
+ const r3=C.createRecord({kind:'note',body:'x',title:'Jiufen',places:[{name:'A-Mei Tea House',type:'food',city:'Jiufen'}]});
+ const r4=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567892',title:'Vlog',city:'Taipei'});
+ const r5=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567893',title:'Outlet haul',places:[{name:'Gloria Outlets',type:'shopping'}]});
+ const rep=C.placeReport([r1,r2,r3,r4,r5]);
+ assert.deepEqual([rep.places,rep.unnamed],[5,1]);
+ assert.deepEqual(rep.cities.map(c=>[c.name,c.count]),[['Taipei',3],['Jiufen',1],['',1]],'most places first, no city last');
+ const food=rep.cities[0].groups[0];
+ assert.equal(food.type,'food');
+ assert.deepEqual(food.places.map(p=>[p.name,p.sources.length]),[['Raohe Night Market',2],['Shilin Night Market',1]]);
+ assert.deepEqual([food.places[0].notes,food.places[0].address],[['pepper buns'],'Raohe St, Songshan'],'notes once; the address from whichever clip had it');
+ assert.deepEqual(food.places[0].sources.map(s=>s.title),['Night markets','Taipei in a day']);
+ const md=C.reportMarkdown(rep,'Taiwan: places by city');
+ assert.match(md,/^# Taiwan: places by city\n\n5 places in 2 cities\.\n\n## Taipei, Taiwan \(3\)\n\n### 🍜 Food \(2\)\n\n- \*\*Raohe Night Market\*\* \(in 2 clips\): pepper buns\n  - Address: Raohe St, Songshan\n  - Map: https:/);
+ assert.match(md,/## City not known yet \(1\)/);assert.match(md,/_1 clip names no place\._\n$/);
+});

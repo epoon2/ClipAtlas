@@ -748,6 +748,66 @@
     return [...plan.slice(0, at), ...parts, ...plan.slice(at + 1)];
   }
 
+  /** The plan kept tidy: stops whose clip or place is gone are dropped, and a stop for a whole clip
+      that now lists its places becomes one stop per place, on its day (each linked to the clip). */
+  function placeStops(plan, records, makeId) {
+    let out = prunePlan(plan, records);
+    const byId = new Map((records || []).map(r => [r.id, r]));
+    for (const id of [...new Set(out.filter(p => !p.placeId).map(p => p.recordId))]) {
+      const r = byId.get(id);
+      if (r && (r.places || []).length) out = splitClipStop(out, r, makeId);
+    }
+    return out;
+  }
+  /** Everything the places of some clips add up to, as research: by city (most places first, no city
+      last), then by kind, each place once with every clip that names it (most-recommended first),
+      its notes and its address. Clips that name no place are only counted.
+      {places, unnamed, cities: [{name, country, count, groups: [{type, places: [{name, type, address,
+      notes, sources: [{id, placeId, title, url, kind}]}]}]}]} */
+  function placeReport(records) {
+    const cities = new Map(); let unnamed = 0;
+    for (const it of tripItems(records)) {
+      if (it.whole && !safeString(it.record.place)) { unnamed++; continue; }
+      const ck = cityKey(it.city);
+      if (!cities.has(ck)) cities.set(ck, { name: it.city, country: '', places: new Map() });
+      const c = cities.get(ck); if (!c.country && it.country) c.country = it.country;
+      const key = it.name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '') || it.key;
+      if (!c.places.has(key)) c.places.set(key, { name: it.name, type: it.type, address: '', notes: [], sources: [] });
+      const p = c.places.get(key);
+      if (!p.address && it.address) p.address = it.address;
+      if (it.note && !p.notes.some(n => n.toLowerCase() === it.note.toLowerCase())) p.notes.push(it.note);
+      if (!p.sources.some(x => x.id === it.recordId))
+        p.sources.push({ id: it.recordId, placeId: it.placeId, title: safeString(it.record.title) || safeString(it.record.place) || 'a saved clip', url: safeString(it.record.url), kind: it.record.kind || 'tiktok' });
+    }
+    const list = [...cities.values()].map(c => {
+      const places = [...c.places.values()];
+      return { name: c.name, country: c.country, count: places.length,
+        groups: PLACE_TYPES.map(type => ({ type, places: places.filter(p => p.type === type)
+          .sort((a, b) => b.sources.length - a.sources.length || a.name.localeCompare(b.name)) })).filter(g => g.places.length) };
+    }).sort((a, b) => (!a.name) - (!b.name) || b.count - a.count || a.name.localeCompare(b.name));
+    return { places: list.reduce((n, c) => n + c.count, 0), unnamed, cities: list };
+  }
+  /** The report as Markdown, to keep or share. */
+  function reportMarkdown(report, title = '') {
+    const where = n => n === 1 ? '1 clip' : n + ' clips';
+    let out = `# ${safeString(title) || 'Saved places'}\n\n${report.places} places in ${report.cities.filter(c => c.name).length} cities.\n`;
+    for (const c of report.cities) {
+      out += `\n## ${c.name ? c.name + (c.country ? ', ' + c.country : '') : 'City not known yet'} (${c.count})\n`;
+      for (const g of c.groups) {
+        out += `\n### ${PLACE_EMOJI[g.type]} ${PLACE_LABELS[g.type]} (${g.places.length})\n\n`;
+        for (const p of g.places) {
+          out += `- **${p.name}**${p.sources.length > 1 ? ` (in ${where(p.sources.length)})` : ''}${p.notes.length ? ': ' + p.notes.join('; ') : ''}\n`;
+          if (p.address) out += `  - Address: ${p.address}\n`;
+          const map = mapsUrl({ name: p.name, address: p.address, city: c.name, country: c.country });
+          if (map) out += `  - Map: ${map}\n`;
+          out += `  - From: ${p.sources.map(x => x.url ? `${x.title} (${x.url})` : x.title).join('; ')}\n`;
+        }
+      }
+    }
+    if (report.unnamed) out += `\n_${where(report.unnamed)} ${report.unnamed === 1 ? 'names' : 'name'} no place._\n`;
+    return out;
+  }
+
   /* ---- Itinerary: days with their cities, and places sorted by city ------- */
   const MAX_DAYS = 30;
   const cityName = v => safeString(v).replace(/\s+/g, ' ').slice(0, 60);
@@ -1193,5 +1253,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { placeStops, placeReport, reportMarkdown, mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

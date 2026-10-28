@@ -141,6 +141,10 @@
     const recs=scopeRecords(),scope=activeCollection||'';
     $('#askScope').textContent=scope||'all your clips';
     $('#askCount').textContent=plural(recs.length,'item','items');
+    const city=(C.cityList(recs)[0]||{}).name;
+    const examples=[city&&`What should I eat in ${city}?`,'Which places do several clips recommend?','List every place by city, then food, sights, shopping and activities.',
+      city&&`What should I not miss in ${city}, and what can I skip?`,'Summarize the tips in these.'].filter(Boolean).slice(0,4);
+    $('#askExamples').innerHTML=examples.map(q=>`<button type="button" class="chip ask-example" data-action="ask-example" data-q="${html(q)}">${html(q)}</button>`).join('');
     $('#askInput').placeholder=scope?`Ask anything about “${scope}”: where to eat in a city, which places several sources recommend, everything sorted by city and then food, sights, activities and shopping…`
       :'Ask anything about your saved clips: where to eat in a city, which places several sources recommend, everything sorted by city…';
     const byId=new Map(state.records.map(r=>[r.id,r]));
@@ -204,6 +208,11 @@
     renderBulkBar();
     $('#filteredCount').textContent=records.every(C.isClip)?records.length+' '+(records.length===1?'clip':'clips'):plural(records.length,'item','items');
     $('#libraryEmpty').hidden=records.length!==0;
+    const asPlaces=libraryView==='places';
+    for(const b of $$('[data-lib-view]')){const on=b.dataset.libView===libraryView;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));}
+    $('#clipGrid').hidden=asPlaces;$('#placesReport').hidden=!asPlaces;
+    if(asPlaces){$('#clipGrid').innerHTML='';renderReport(records);return;}
+    $('#placesReport').innerHTML='';
     $('#clipGrid').innerHTML=records.map(r=>{
       const clip=C.isClip(r),host=r.kind==='link'?hostOf(r.url):'';
       const title=r.title||r.place||(clip?'Untitled saved TikTok':host||'Untitled note');
@@ -220,6 +229,33 @@
         :`${r.kind==='link'?`<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open the page">↗ Open</a>`:''}<button data-action="read-item" data-id="${html(r.id)}" title="Let the AI read it again and list the places in it"${reading.has(r.id)?' disabled':''}>✦ Read</button>`;
       return `<article class="clip-card${clip?'':' kind-'+html(r.kind)}${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags">${flags}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html([host,loc||(clip?'Location not yet identified':'')].filter(Boolean).join(' · ')||'No place yet')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${placeLine}${about?`<p class="clip-notes">${html(about)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions">${actions}<button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete ${clip?'clip':r.kind==='link'?'web page':'note'}">✕</button></div></article>`;
     }).join('');
+  }
+  // Places by city: what the clips shown (the open collection, filtered) add up to, as research.
+  let libraryView=(()=>{try{return localStorage.getItem('ClipAtlasLibraryView')==='places'?'places':'cards';}catch(_){return 'cards';}})();
+  let lastReport=null;
+  function renderReport(records){
+    const box=$('#placesReport'),rep=C.placeReport(records);lastReport=rep;
+    if(!records.length){box.innerHTML='';return;}
+    if(!rep.places){box.innerHTML='<div class="day-empty">No places found in these yet. Auto-review lists the places each clip names or shows (✦ Read does it for a web page or note).</div>';return;}
+    const dayOf=C.planDays(state.plan),named=rep.cities.filter(c=>c.name);
+    let s=`<div class="report-head"><p><strong>${plural(rep.places,'place','places')}</strong> in ${plural(named.length,'city','cities')}, from ${plural(records.length,'item','items')}${rep.unnamed?` (${rep.unnamed} ${rep.unnamed===1?'names':'name'} no place)`:''}. In each city: food, shopping, sights, activities, then places to stay; places named by several clips come first.</p><button type="button" class="btn-subtle" data-action="report-download">↓ Download</button></div>`;
+    if(named.length>1)s+=`<nav class="city-jump" aria-label="Cities">${named.map(c=>`<button type="button" class="chip" data-action="report-jump" data-city="${html(c.name.toLowerCase())}">${html(c.name)} <small>${c.count}</small></button>`).join('')}</nav>`;
+    for(const c of rep.cities){
+      s+=`<section class="report-city" data-report-city="${html(c.name.toLowerCase())}"><h3>${c.name?'📍 '+html(c.name):'City not known yet'} <small>${html([c.country,plural(c.count,'place','places')].filter(Boolean).join(' · '))}</small></h3>`;
+      if(!c.name)s+='<p class="hint">Open one (its clip’s name) to type its city, or type it next to it in Itinerary → By city.</p>';
+      s+='<div class="report-groups">';
+      for(const g of c.groups){
+        s+=`<div class="report-group"><h4>${kindLabel(g.type)} <small>${g.places.length}</small></h4><ul>`;
+        for(const p of g.places){
+          const map=C.mapsUrl({name:p.name,address:p.address,city:c.name,country:c.country});
+          const day=p.sources.map(x=>dayOf({key:x.id+'#'+(x.placeId||''),recordId:x.id})).find(Boolean);
+          s+=`<li class="report-place"><div class="report-text"><strong>${html(p.name)}</strong>${p.sources.length>1?` <span class="report-count">${p.sources.length} clips</span>`:''}${day?` <span class="report-day">Day ${day}</span>`:''}${p.address?`<span class="report-address">📍 ${html(p.address)}</span>`:''}${p.notes.length?`<span class="report-notes">${html(p.notes.join(' · '))}</span>`:''}<span class="report-from">From ${p.sources.map(x=>`<button type="button" class="link-inline" data-action="edit-item" data-id="${html(x.id)}" data-place="${html(x.placeId||'')}" title="Open it in Edit">${html(x.title)}</button>${x.url?` <a href="${html(x.url)}" target="_blank" rel="noopener noreferrer" title="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}" aria-label="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}">↗</a>`:''}`).join(', ')}</span></div>${map?`<a class="map-link" href="${html(map)}" target="_blank" rel="noopener noreferrer" title="Open in Google Maps" aria-label="Open ${html(p.name)} in Google Maps">📍</a>`:''}</li>`;
+        }
+        s+='</ul></div>';
+      }
+      s+='</div></section>';
+    }
+    box.innerHTML=s;
   }
   // The Itinerary page has three views: an overview of what the clips add up to (with
   // Fill the days), the days, and every saved clip sorted by city.
@@ -383,6 +419,8 @@
     if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}
   }
   const stopId=()=>'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+  // Stops follow the places: a planned clip that now lists its places gets one stop per place.
+  const tidyPlan=()=>{state.plan=C.placeStops(state.plan,state.records,stopId);};
   // Plan a place (or a clip with none listed) on a day from By city; 0 takes it off. A moved stop
   // goes to the end of its new day. A whole-clip stop is first split into one stop per place.
   function planOnDay(key,day){
@@ -494,7 +532,7 @@
     if(saved.body&&saved.body!==old?.body&&JSON.stringify(state).length+saved.body.length>LIBRARY_FULL){
       saved.body=saved.body.slice(0,3000);toast('Your library is nearly full (2 MB), so only the first 3,000 characters of the text were kept.');}
     if(old)state.records[state.records.indexOf(old)]=saved;else state.records.push(saved);
-    state.plan=C.prunePlan(state.plan,state.records);
+    tidyPlan();
     $('#editDialog').close();commit();
     // A new or changed web page or note is read by the AI for its places (a new link with no text: the page is read first).
     const changed=!old||old.body!==saved.body||old.url!==saved.url;
@@ -574,7 +612,7 @@
       // Only what the text says (the Cloudflare route echoes the text back as a "transcript").
       const next=C.applyUnderstanding(cur,{...res,transcript:'',heard:false,onScreen:'',shows:''},{markReviewed:false});
       state.records[state.records.indexOf(cur)]=next;
-      state.plan=C.prunePlan(state.plan,state.records);commit();
+      tidyPlan();commit();
       const n=(next.places||[]).length;
       toast(n?`Found ${plural(n,'place','places')} in “${name()}”.`:`Read “${name()}”: it names no places.`);
     }finally{reading.delete(id);if(currentTab==='library')renderLibrary();}
@@ -1162,7 +1200,7 @@
         // The library is one saved file of at most 2 MB: keep long transcripts short when it is nearly full.
         if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
         state.records[i]=next;
-        if((next.places||[]).length)state.plan=C.prunePlan(state.plan,state.records);
+        tidyPlan();
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
         auto.finished++;
         if(res.use){auto.neurons+=res.use.neurons;auto.useClips++;if(res.use.partial)auto.usePartial=true;}
@@ -1693,12 +1731,18 @@
     // Category lists are filled from the account's own categories in render().
     document.addEventListener('click',evt=>{
       const tab=evt.target.closest('[data-tab]');if(tab){selectTab(tab.dataset.tab);return;}
+      const lib=evt.target.closest('[data-lib-view]');
+      if(lib){libraryView=lib.dataset.libView;try{localStorage.setItem('ClipAtlasLibraryView',libraryView);}catch(_){/* remembered for this visit only */}renderLibrary();return;}
       const coll=evt.target.closest('[data-collection]');if(coll){activeCollection=coll.dataset.collection;selectTab('library');return;}
       const action=evt.target.closest('[data-action]');if(!action)return;
       const {action:kind,id}=action.dataset;
       if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
       else if(kind==='read-item')readItem(id);
+      else if(kind==='report-download'&&lastReport){const name=activeCollection||'Saved places';
+        download(`${name.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase()||'places'}-places-by-city.md`,C.reportMarkdown(lastReport,`${name}: places by city`),'text/markdown');}
+      else if(kind==='report-jump'){const sec=[...$$('#placesReport .report-city')].find(x=>x.dataset.reportCity===action.dataset.city);if(sec)sec.scrollIntoView({behavior:'smooth',block:'start'});}
+      else if(kind==='ask-example'){$('#askInput').value=action.dataset.q;$('#askForm').requestSubmit();}
       else if(kind==='edit-item')openEditor(id,'tiktok',action.dataset.place||'');
       else if(kind==='use-category'){const r=state.records.find(x=>x.id===id),cat=action.dataset.category;
         if(r&&categoryList().some(c=>c.name===cat)){state.records[state.records.indexOf(r)]={...r,category:cat,autoSorted:undefined,updatedAt:new Date().toISOString()};commit();
@@ -1841,11 +1885,15 @@
   }
   async function enter() {
     const saved=await Cloud.load();const setup=applyState(saved);
+    // A plan made before the clips' places were listed: each clip's stop becomes its places' stops.
+    const wholeStops=state.plan.filter(p=>!p.placeId).length;tidyPlan();
+    const split=wholeStops-state.plan.filter(p=>!p.placeId).length;
     $('#authGate').hidden=true;$('#appShell').hidden=false;
     $('#saveStatus').textContent='Saved to your account';
     init();
     if(setup.needsChoice)openStarterDialog();
-    else if(setup.migrated)commit();
+    else if(setup.migrated||split)commit();
+    if(split)toast(`Your itinerary now has a stop for each place (${state.plan.length} stops). Itinerary → Overview → Fill the days spreads them over your days.`);
   }
   document.addEventListener('DOMContentLoaded',async()=>{
     authUI();

@@ -107,9 +107,9 @@ check('a note has no link field and a NOTE box', !(await page.isVisible('#urlFie
 check('… and goes into the open collection', (await page.inputValue('#editForm [name="collections"]')) === 'Taiwan');
 await page.click('#editForm button[type="submit"]');
 check('an empty note is not saved', /Type the note/.test(await page.textContent('#modalError')));
-await page.fill('#editForm [name="body"]', 'From Amy: A-Mei Tea House in Jiufen, go on a weekday.');
+await page.fill('#editForm [name="body"]', 'From Amy: A-Mei Tea House in Jiufen, go on a weekday. Raohe Night Market too.');
 await page.click('#editForm button[type="submit"]');
-check('the note is read too', await waitFor(async () => /Found 1 place/.test(await page.textContent('#toast'))), await page.textContent('#toast'));
+check('the note is read too', await waitFor(async () => /Found 2 places/.test(await page.textContent('#toast'))), await page.textContent('#toast'));
 const note = card('Jiufen tea');
 check('the note card says NOTE, with its text and no Open link', /NOTE/.test(await note.textContent()) && /From Amy/.test(await note.textContent()) && (await note.locator('a').count()) === 0);
 
@@ -130,12 +130,40 @@ check('search finds words in a page’s text', await (async () => { await page.f
   const n = await page.locator('#clipGrid .clip-card').count(); await page.fill('#search', ''); return n === 1; })());
 
 // 5. Ask uses the pages and the note.
-await page.click('#askPanel summary');
-await page.fill('#askInput', 'Where should I eat breakfast?');
-await page.click('#askButton');
+const examples = await page.$$eval('#askExamples .ask-example', b => b.map(x => x.textContent));
+check('Ask is open above the cards, with example questions for this collection',
+  await page.$eval('#askPanel', d => d.open) && await page.isVisible('#askInput') && /Ask AI about Taiwan/.test(await page.textContent('#askPanel summary')) &&
+  examples.includes('What should I eat in Taipei?') && examples.includes('Which places do several clips recommend?'), JSON.stringify(examples));
+await page.locator('#askExamples .ask-example', { hasText: 'several clips recommend' }).click();
 await waitFor(async () => (await page.locator('#askAnswers .ask-item').count()) > 0);
 const asked = gemini.asks[0] || '';
+check('an example is asked with one click', /Which places do several clips recommend\?/.test(asked) && /several clips recommend/.test(await page.textContent('#askAnswers .ask-q')));
 check('Ask is given the pages and the note as sources', /Web page: "48 hours in Taipei"/.test(asked) && /Note: "Jiufen tea"/.test(asked) && /A-Mei Tea House/.test(asked), asked.slice(0, 300));
+
+// 5b. The collection as research: every place by city, then by kind, each once with the clips that name it.
+await page.click('[data-lib-view="places"]');
+await page.screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-report.png'), fullPage: true });
+const report = await page.$$eval('#placesReport .report-city', els => els.map(c => [c.querySelector('h3').textContent, [...c.querySelectorAll('.report-place strong')].map(s => s.textContent)]));
+check('Places by city lists the collection\'s places by city and kind, the most-recommended first',
+  JSON.stringify(report) === JSON.stringify([['📍 Taipei Taiwan · 3 places', ['Raohe Night Market', 'Fuhang Soy Milk', 'Taipei 101']], ['📍 Jiufen Taiwan · 1 place', ['A-Mei Tea House']]])
+  && !(await page.isVisible('#clipGrid')), JSON.stringify(report));
+check('… and says how many places, cities and items it is from', /^4 places in 2 cities, from 3 items \(1 names no place\)/.test(await page.textContent('#placesReport .report-head p')),
+  await page.textContent('#placesReport .report-head p'));
+const raohe = page.locator('#placesReport .report-place', { has: page.locator('strong', { hasText: 'Raohe Night Market' }) });
+check('a place two items name says so, and lists both', (await raohe.locator('.report-count').textContent()) === '2 clips' && /^From (Jiufen tea, 48 hours in Taipei ↗|48 hours in Taipei ↗, Jiufen tea)$/.test(await raohe.locator('.report-from').textContent()),
+  await raohe.textContent());
+const fuhang = page.locator('#placesReport .report-place', { has: page.locator('strong', { hasText: 'Fuhang Soy Milk' }) });
+check('each place has its notes and a Google Maps pin', /egg crepe and soy milk/.test(await fuhang.textContent()) &&
+  (await fuhang.locator('a.map-link').getAttribute('href')) === 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent('Fuhang Soy Milk, Taipei, Taiwan'));
+await raohe.locator('.report-from button', { hasText: 'Jiufen tea' }).click();
+check('the name of a clip it is from opens that clip in Edit, at the place', await page.isVisible('#editDialog[open]') &&
+  await page.evaluate(() => document.activeElement.closest('.place-row')?.querySelector('.pl-name').value) === 'Raohe Night Market');
+await page.click('#cancelEdit');
+const [reportFile] = await Promise.all([page.waitForEvent('download'), page.click('[data-action="report-download"]')]);
+const reportMd = (await import('node:fs')).readFileSync(await reportFile.path(), 'utf8');
+check('Download gives the research as a Markdown file', reportFile.suggestedFilename() === 'taiwan-places-by-city.md' && /^# Taiwan: places by city\n/.test(reportMd) &&
+  /- \*\*Raohe Night Market\*\* \(in 2 clips\)/.test(reportMd), reportFile.suggestedFilename() + ' ' + reportMd.slice(0, 200));
+await page.click('[data-lib-view="cards"]');
 
 // 6. Planning: a page's places become stops that link back to the page; a note's say where they came from.
 await page.click('[data-tab="library"]');
@@ -150,6 +178,22 @@ check('a page’s stop links to the page', (await page.locator('#itineraryDays a
 check('a note’s stop says it is from the note', /From your note “Jiufen tea”/.test(days));
 await page.click('[data-itinerary-view="cities"]');
 check('By city lists the note’s place under Jiufen', /Jiufen[\s\S]*A-Mei Tea House/.test(await page.textContent('#itineraryCities')));
+
+// 6b. A plan made before the places were listed: when the site opens, each clip's stop becomes its places' stops.
+await page.waitForTimeout(500);
+const lib = await page.evaluate(async () => (await fetch('/api/library', { credentials: 'same-origin' })).json());
+const guideRec = lib.state.records.find(r => r.title === '48 hours in Taipei');
+lib.state.plan = [...lib.state.plan.filter(p => p.recordId !== guideRec.id), { id: 'old-stop', recordId: guideRec.id, day: 2, note: 'old plan' }];
+await page.evaluate(async body => { await fetch('/api/library', { method: 'PUT', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); },
+  { state: lib.state, revision: lib.revision });
+await page.reload();
+await page.waitForSelector('#appShell:not([hidden])');
+check('an old whole-clip stop is split into its places when the site opens, and it says so', await waitFor(async () => /now has a stop for each place/.test(await page.textContent('#toast'))),
+  await page.textContent('#toast'));
+await page.waitForTimeout(600);
+const splitPlan = (await page.evaluate(async () => (await (await fetch('/api/library', { credentials: 'same-origin' })).json()).state.plan)).filter(p => p.recordId === guideRec.id);
+check('… one stop per place, on the same day, the old note kept on the first, and saved', JSON.stringify(splitPlan.map(p => [!!p.placeId, p.day, p.note])) === JSON.stringify([[true, 2, 'old plan'], [true, 2, ''], [true, 2, '']]),
+  JSON.stringify(splitPlan));
 
 // 7. Everything survives a reload.
 await page.waitForTimeout(500);
