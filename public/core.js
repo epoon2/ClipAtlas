@@ -469,6 +469,7 @@
     const fill = (key, value, n) => { if (!safeString(next[key]) && safeString(value)) next[key] = safeString(value).slice(0, n); };
     fill('title', res.title, 300); fill('place', res.place, 200); fill('city', res.city, 120); fill('country', res.country, 120);
     fill('caption', res.onScreen, 2000);
+    if (/^@[\w.]{1,40}$/.test(safeString(res.creator))) fill('creator', res.creator, 60);
     const category = categoryName(res.category);
     if ((!next.category || next.category === 'Unsorted') && category && category !== 'Unsorted') {
       next.category = category; next.autoSorted = undefined;
@@ -504,11 +505,11 @@
     return samples.length ? Math.sqrt(sum / samples.length) : 0;
   }
   /** The seconds at which to screenshot a video of ``length`` seconds: about
-      one every 10 seconds (at least 3, at most 18), from just after the start
+      one every 5 seconds (at least 3, at most 18), from just after the start
       to just before the end, never closer than a second apart. */
   function shotTimes(length) {
     const first = Math.min(1.2, length * 0.3), last = Math.max(first, length - 0.6);
-    const count = Math.max(3, Math.min(18, Math.round(length / 10)));
+    const count = Math.max(3, Math.min(18, Math.round(length / 5)));
     const out = [];
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? first : first + (last - first) * i / (count - 1);
@@ -527,12 +528,12 @@
   }
   function sigFlat(a) {
     if (!a || !a.length) return true;
-    // Flat when nearly all of it is one shade: a blank or a spinner on a blank.
+    // Flat when almost all of it is one shade: a blank (a moving spinner is caught by the picture changing).
     const bins = new Array(11).fill(0);
     for (let i = 0; i < a.length; i++) bins[Math.min(10, Math.floor(a[i] / 24))]++;
     let best = 0;
     for (let i = 0; i < 10; i++) best = Math.max(best, bins[i] + bins[i + 1]);
-    return best / a.length >= 0.92;
+    return best / a.length >= 0.985;
   }
 
   const REVIEW_SCOPES = { review: 'Needs review', unsorted: 'Unsorted', all: 'All clips' };

@@ -50,8 +50,11 @@ else if (id.endsWith('5')) {
   // describe. Each slide shows a flat gray "loading" picture first; slide 3 takes 2.5 seconds to load.
   const colors = ['rgb(30,60,220)', 'rgb(30,170,60)', 'rgb(240,150,20)', 'rgb(150,40,190)'];
   let loading = null;
-  const show = i => { document.body.style.background = colors[i]; document.querySelector('div').textContent = 'SLIDE ' + (i + 1); };
-  const load = i => { clearTimeout(loading); document.body.style.background = 'rgb(128,128,128)'; document.querySelector('div').textContent = '';
+  // Like a photo, a loaded slide is not one flat color: a white card with words sits on it.
+  const card = document.querySelector('div');
+  card.style.cssText = 'margin:60px 24px;padding:40px 12px;background:#fff;color:#111;height:160px';
+  const show = i => { document.body.style.background = colors[i]; card.style.visibility = 'visible'; card.textContent = 'SLIDE ' + (i + 1); };
+  const load = i => { clearTimeout(loading); document.body.style.background = 'rgb(128,128,128)'; card.style.visibility = 'hidden';
     loading = setTimeout(() => show(i), i === 2 ? 2500 : 700); };
   show(0);
   addEventListener('message', e => {
@@ -141,6 +144,12 @@ check('switching away pauses it', /^Paused: this tab is hidden/.test(pausedText)
 await setHidden(false);
 await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three)/.test(document.getElementById('autoNow').textContent), null, { timeout: 90000 });
 const summary = await page.textContent('#autoNow');
+const took = await page.textContent('#autoTime');
+check('the run says how long it took', /^Took \d+:\d\d · \d+:\d\d a clip on average$/.test(took), took);
+const facts = await page.$$eval('#autoResults li small', els => els.map(e => e.textContent));
+check('each clip says what was heard and read, and how long it took', facts.length === 4 && facts.filter(f => !f).length === 1 &&
+  facts.filter(f => /^\d+ words heard · \d+ screenshots · \d+:\d\d$/.test(f)).length === 2 &&
+  facts.some(f => /^no speech heard · 4 slides · 0:(0\d|1\d)$/.test(f)), JSON.stringify(facts));
 check('the run finishes and says what happened', /^Done\. 3 filled in, 0 nothing heard or seen, 1 would not play, 0 failed\./.test(summary), summary);
 await page.screenshot({ path: process.env.SHOT || '/tmp/clipatlas-auto.png' });
 
@@ -162,8 +171,8 @@ const red = ([r, g, b]) => r > 150 && g < 90 && b < 90;
 const videoSheets = sheets.filter(s => s.panels.every(red)), slideSheets = sheets.filter(s => !s.panels.some(red));
 check('video screenshots show the player itself', videoSheets.every(s => s.h === 640 && s.w >= 360), JSON.stringify(videoSheets));
 const videoShots = videoSheets.map(s => s.panels.length);
-check('a 100-second video is watched to its end: ten screenshots across it, on four sheets (the 3-second one: two)',
-  JSON.stringify(videoShots.slice().sort()) === JSON.stringify([1, 2, 3, 3, 3]), JSON.stringify(videoShots) + ' ' + traces.join(' ; '));
+check('a 100-second video is watched to its end: eighteen screenshots across it, on six sheets (the 3-second one: two)',
+  JSON.stringify(videoShots.slice().sort()) === JSON.stringify([2, 3, 3, 3, 3, 3, 3]), JSON.stringify(videoShots) + ' ' + traces.join(' ; '));
 const slideColors = slideSheets.flatMap(s => s.panels.map(([r, g, b]) => Math.abs(r - g) < 25 && Math.abs(g - b) < 25 ? 'gray' : r > 200 ? 'orange' : b > 150 && r < 90 ? 'blue' : g > 120 ? 'green' : 'purple'));
 check('every slide was screenshotted once it had loaded (never the gray loading picture), in order, on two sheets', slideSheets.length === 2 &&
   JSON.stringify(slideColors) === JSON.stringify(['blue', 'green', 'orange', 'purple']), JSON.stringify(slideSheets.map(s => s.panels)));
@@ -193,6 +202,9 @@ check('auto-review results survive a reload', (await page.$$('#clipGrid .clip-ca
 // Checking one in Review mode takes its Auto-reviewed badge off.
 const id = await page.locator('#clipGrid .clip-card', { has: page.locator('h3', { hasText: 'Beef noodles in Taipei' }) }).first()
   .locator('[data-action="watch"]').getAttribute('data-id');
+await page.click(`#clipGrid [data-action="edit"][data-id="${id}"]`);
+check('Edit shows what was said', await page.isVisible('#editHeard') && (await page.textContent('#editTranscript')) === 'the best beef noodles in taipei');
+await page.click('#cancelEdit');
 await page.click(`#clipGrid [data-action="watch"][data-id="${id}"]`);
 await page.waitForSelector('#reviewDialog[open]');
 check('Review shows what was said and the text on the video', await page.isVisible('#reviewHeard')

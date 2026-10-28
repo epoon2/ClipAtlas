@@ -86,3 +86,4 @@
 @media(max-width:600px){.bulk-gap{display:none}.bulk-bar{bottom:8px}.bulk-bar select{max-width:100%;flex:1}}
 .toast{z-index:60}body.selecting .toast{bottom:96px}
 .ai-check{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 8px}#aiCheckOut{margin-bottom:10px}#aiCheckOut li{word-break:break-word}
+.auto-time{font-size:12px;color:#6c827a!important;font-variant-numeric:tabular-nums}.auto-results li small{display:block;color:#7a8f88;margin-top:2px}

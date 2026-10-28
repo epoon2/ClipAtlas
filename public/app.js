@@ -181,6 +181,10 @@
       const el=form.elements.namedItem(key); if(el) el.value=r[key]||'';
     }
     if(r){form.elements.namedItem('collections').value=(r.collections||[]).join(', ');form.elements.namedItem('tags').value=(r.tags||[]).join(', ');}
+    const said=r?.auto?.transcript||'';
+    $('#editHeard').hidden=!r?.auto;
+    $('#editTranscript').textContent=said||(r?.auto?'No speech was heard (music only, or nothing said).':'');
+    $('#copyEditTranscript').hidden=!said;
     $('#editDialog').showModal();
   }
   function editorSave(evt) {
@@ -486,6 +490,10 @@
       if(!leaveClip()){evt.target.value=rv.scope;return;}
       rv.dirty=false;openReview(evt.target.value);
     });
+    $('#copyEditTranscript').addEventListener('click',async()=>{
+      try{await navigator.clipboard.writeText($('#editTranscript').textContent);toast('Transcript copied.');}
+      catch(_){toast('Copying is blocked here; select the text and copy it instead.');}
+    });
     $('#copyTranscript').addEventListener('click',async()=>{
       try{await navigator.clipboard.writeText($('#reviewTranscript').textContent);toast('Transcript copied.');}
       catch(_){toast('Copying is blocked here; select the text and copy it instead.');}
@@ -599,19 +607,38 @@
     $('#autoCounts').textContent=`${auto.index>=auto.queue.length?'All '+auto.queue.length+' clips':'Clip '+(auto.index+1)+' of '+auto.queue.length} · ${auto.mode==='transcript'?(t.transcribed||0)+' transcribed':(t.understood||0)+' filled in'} · ${t.empty||0} nothing heard or seen · ${t.unavailable||0} would not play · ${t.failed||0} failed`;
     $('#autoBar').style.width=Math.round(auto.index/auto.queue.length*100)+'%';
   }
-  function autoListItem(r,res){
+  const clock=ms=>{const s=Math.max(0,Math.round(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s/60)%60;
+    return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s%60).padStart(2,'0');};
+  // How long the run has taken, and about how long is left (from the clips done so far).
+  function autoTime(){
+    if(!auto)return;
+    const ran=Date.now()-auto.startedAt-auto.pausedMs-(auto.pausedSince?Date.now()-auto.pausedSince:0),done=auto.finished;
+    const left=done?Math.round(ran/done*(auto.queue.length-done)):0;
+    $('#autoTime').textContent=`Running ${clock(ran)}${auto.pausedSince?' · paused':''}${done&&left?' · about '+clock(left)+' left':''}`;
+  }
+  // What one clip gave: how many words were heard, how many screenshots or slides were read, and how long it took.
+  function autoFacts(res,meta){
+    if(!meta||res.status==='unavailable')return '';
+    const words=(res.transcript||'').split(/\s+/).filter(Boolean).length;
+    return [words?`${words} word${words===1?'':'s'} heard`:'no speech heard',
+      meta.slides?`${meta.slides} slide${meta.slides===1?'':'s'}`:meta.shots?`${meta.shots} screenshot${meta.shots===1?'':'s'}`:'',
+      clock(meta.ms)].filter(Boolean).join(' · ');
+  }
+  function autoListItem(r,res,meta){
     const li=document.createElement('li');
+    const facts=document.createElement('small');facts.textContent=autoFacts(res,meta);
+    const list=$('#autoResults');
     if(res.status==='transcribed'){
-      const li=document.createElement('li');li.className='ok';const b=document.createElement('strong');b.textContent=r.title||'A clip';
-      li.append(b,document.createTextNode(`: “${(res.transcript||'').slice(0,90)}${(res.transcript||'').length>90?'…':''}”`));
-      const list=$('#autoResults');list.prepend(li);while(list.children.length>8)list.lastChild.remove();return;
+      li.className='ok';const b=document.createElement('strong');b.textContent=r.title||'A clip';
+      li.append(b,document.createTextNode(`: “${(res.transcript||'').slice(0,90)}${(res.transcript||'').length>90?'…':''}”`),facts);
+      list.prepend(li);while(list.children.length>8)list.lastChild.remove();return;
     }
     const ok=res.status==='understood';
     li.className=ok?'ok':'not';
     const title=document.createElement('strong');title.textContent=ok?(r.title||'Untitled'):(r.title||'A clip');
     li.append(title,document.createTextNode(ok?` → ${emojiFor(r.category)} ${r.category}${res.heard||res.seen?' (from '+[res.heard&&'what was said',res.seen&&'what was shown'].filter(Boolean).join(' and ')+')':''}`
-      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}${res.detail?' ('+res.detail+')':''}`));
-    const list=$('#autoResults');list.prepend(li);while(list.children.length>8)list.lastChild.remove();
+      :`: ${AUTO_REASONS[res.reason]||C.AUTO_LABELS[res.status]||res.reason}${res.detail?' ('+res.detail+')':''}`),facts);
+    list.prepend(li);while(list.children.length>8)list.lastChild.remove();
   }
   async function startAuto(){
     if(auto)return;
@@ -635,7 +662,8 @@
       $('#autoError').textContent='The tab\'s sound was not shared. Press Start again and turn on "Also share tab audio".';return;
     }
     auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,mark:mode==='details'&&$('#autoMark').checked,mode,
-      chunks:[],recording:false};
+      chunks:[],recording:false,startedAt:Date.now(),pausedMs:0,pausedSince:0,finished:0};
+    auto.clock=setInterval(autoTime,1000);autoTime();
     $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
     $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
     let stopReason='';
@@ -653,7 +681,7 @@
       video.srcObject=new MediaStream(stream.getVideoTracks());await video.play();auto.video=video;
       try{auto.wake=await navigator.wakeLock?.request('screen');}catch(_){/* the screen may sleep; capture still works while the tab is open */}
       // Save one clip's result. False when the run has to stop.
-      const keep=async(r,res)=>{
+      const keep=async(r,res,meta)=>{
         if(res.stopRun){stopReason=res.message;auto.stop=true;return false;}
         const i=state.records.findIndex(x=>x.id===r.id);if(i<0)return true;
         let next=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
@@ -661,7 +689,8 @@
         if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
         state.records[i]=next;
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
-        autoListItem(state.records[i],res);
+        auto.finished++;
+        autoListItem(state.records[i],res,meta);
         commit();await persist();
         if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';auto.stop=true;return false;}
         auto.failsInRow=res.status==='failed'?auto.failsInRow+1:0;
@@ -673,21 +702,26 @@
       let pending=null;
       const settle=async()=>{
         if(!pending)return true;
-        const {r,work}=pending;pending=null;
-        return keep(r,await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)})));
+        const {r,work,meta}=pending;pending=null;
+        return keep(r,await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)})),meta);
       };
       for(;auto.index<auto.queue.length&&!auto.stop;auto.index++){
         const r=state.records.find(x=>x.id===auto.queue[auto.index]);if(!r)continue;
         autoCounts();
+        const clipStarted=Date.now(),pausedBefore=auto.pausedMs;
         const got=await autoPlayClip(r);
+        const meta={ms:Date.now()-clipStarted-(auto.pausedMs-pausedBefore),shots:got.played?got.played.shots.length:0,slides:got.played?got.played.slides:0};
         if(got.done&&(got.done.reason==='SHARING_STOPPED'||got.done.reason==='STOPPED'))break;  // nothing saved for a clip cut short
         if(!await settle())break;
-        if(got.done){if(!await keep(r,got.done))break;continue;}
-        pending={r,work:autoAnalyze(r,got)};
+        if(got.done){if(!await keep(r,got.done,meta))break;continue;}
+        pending={r,work:autoAnalyze(r,got),meta};
       }
       if(pending){autoSay('Finishing the last clip…');await settle();}
     }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
     finally{
+      clearInterval(auto.clock);autoTime();
+      const took=Date.now()-auto.startedAt-auto.pausedMs;
+      $('#autoTime').textContent=`Took ${clock(took)}${auto.finished?' · '+clock(took/auto.finished)+' a clip on average':''}`;
       const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed;
       autoCounts();
       autoCleanup();
@@ -796,9 +830,10 @@
     return out;
   }
   // Wait until a slide has finished loading: at least a second, the picture
-  // unchanged for 0.8 seconds, not one flat color (a blank, loading slide),
-  // and different from the slide before (unless 4 seconds pass). At most 10
-  // seconds of visible time; time while the tab is hidden does not count.
+  // unchanged for 0.8 seconds, not one flat color (a blank, loading slide)
+  // unless 5 seconds pass, and different from the slide before unless 4
+  // seconds pass. At most 10 seconds of visible time; time while the tab is
+  // hidden does not count.
   function autoSteady(frame,before,isDone){
     return new Promise(resolve=>{
       let last=null,calm=0,waited=0,tick=Date.now();
@@ -809,7 +844,9 @@
         const sig=autoSig(frame);
         if(sig){
           calm=last&&C.sigChange(sig,last)<0.004?calm+1:0;last=sig;
-          const loaded=calm>=4&&waited>=1000&&!C.sigFlat(sig)&&(!before||C.sigChange(sig,before)>0.01||waited>=4000);
+          const settled=calm>=4&&waited>=1000;
+          // A plain slide (one flat color) is taken only after 5 seconds, in case it is still loading.
+          const loaded=settled&&(!C.sigFlat(sig)||waited>=5000)&&(!before||C.sigChange(sig,before)>0.01||waited>=4000);
           if(loaded||waited>=10000)return resolve(sig);
         }else if(waited>=10000)return resolve(null);
         setTimeout(step,200);
@@ -849,10 +886,10 @@
       const onVisible=()=>{
         if(finished)return;
         if(document.hidden&&!paused){
-          paused=true;pausedAt=Date.now();if(!slides)send('pause');record(false);
+          paused=true;pausedAt=Date.now();auto.pausedSince=pausedAt;if(!slides)send('pause');record(false);
           autoSay('Paused: this tab is hidden. Come back to it to continue.');
         }else if(!document.hidden&&paused){
-          paused=false;const gap=Date.now()-pausedAt;started+=gap;if(ready)ready+=gap;askedAt+=gap;lastTick=Date.now();
+          paused=false;const gap=Date.now()-pausedAt;auto.pausedMs+=gap;auto.pausedSince=0;started+=gap;if(ready)ready+=gap;askedAt+=gap;lastTick=Date.now();
           if(!slides)send('play');if(listening)record(true);
           autoSay('Continuing…');
         }
@@ -860,6 +897,7 @@
       const finish=reason=>{
         if(finished)return;finished=true;
         clearInterval(timer);window.removeEventListener('message',onMessage);document.removeEventListener('visibilitychange',onVisible);
+        if(paused){auto.pausedMs+=Date.now()-pausedAt;auto.pausedSince=0;}
         record(false);send('pause');auto.finishClip=null;
         resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError});
       };
