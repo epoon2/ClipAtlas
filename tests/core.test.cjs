@@ -77,6 +77,51 @@ test('itinerary days: 1 to 30, each with its cities; a clip goes to the day set 
  assert.equal(C.dayForClip({city:'Kaohsiung'},days,3),1); assert.equal(C.dayForClip({city:''},days,3),1);
  assert.equal(C.dayForClip({city:'Jiufen'},days,2),1,'only days that are in the trip');
 });
+test('trip overview: a country\'s clips by city, with their categories and named places',()=>{
+ const rec=(id,city,category,place='',country='Taiwan')=>({id,city,category,place,country});
+ const records=[rec('a','Taipei','Food','Lin Dong Fang'),rec('b','Taipei','Shops','lin dong fang'),rec('c','Taipei','Food','Raohe'),
+  rec('d','Tainan','Food','',''),rec('e','Tainan','Acts'),rec('f','','Tips'),rec('g','Tokyo','Food','','Japan'),rec('h','','Food','','')];
+ const cats=[{name:'Food'},{name:'Shops'},{name:'Acts'},{name:'Tips'}];
+ assert.deepEqual(C.tripCountries(records),[{country:'Taiwan',count:6},{country:'Japan',count:1}],'a clip with no country takes its city\'s');
+ const o=C.tripOverview(records,cats,'taiwan');
+ assert.deepEqual([o.total,o.noCity],[6,1]);
+ assert.deepEqual(o.categories,[{category:'Food',count:3},{category:'Shops',count:1},{category:'Acts',count:1},{category:'Tips',count:1}]);
+ assert.deepEqual(o.cities.map(c=>[c.name,c.count,c.places,c.categories.map(g=>g.category+' '+g.count)]),
+  [['Taipei',3,['Lin Dong Fang','Raohe'],['Food 2','Shops 1']],['Tainan',2,[],['Food 1','Acts 1']]],'named places each once');
+ assert.equal(C.tripOverview(records,cats,'').total,8,'everywhere');
+});
+test('suggested days: one per city first, then to the busiest; never more days than clips',()=>{
+ const cities=[{name:'Taipei',count:30},{name:'Tainan',count:10},{name:'Jiufen',count:3}];
+ assert.deepEqual(C.suggestDays(cities,7),[{name:'Taipei',days:4},{name:'Tainan',days:2},{name:'Jiufen',days:1}]);
+ assert.deepEqual(C.suggestDays(cities,2).map(c=>c.days),[1,1,0],'fewer days than cities: the biggest ones');
+ assert.deepEqual(C.suggestDays([{name:'A',count:2},{name:'B',count:1}],7).map(c=>c.days),[2,1],'days left free rather than empty days');
+ assert.deepEqual(C.suggestDays([],5),[]);
+});
+test('auto-fill: each city on its days in order, its clips spread over them, a mix, at most 8 a day',()=>{
+ const rec=(id,city,category,place='')=>({id,city,category,place});
+ const records=[];
+ for(let i=0;i<12;i++)records.push(rec('f'+i,'Taipei','Food',i<3?'Place '+i:''));
+ for(let i=0;i<6;i++)records.push(rec('s'+i,'Taipei','Shops'));
+ for(let i=0;i<10;i++)records.push(rec('a'+i,'taipei','Acts'));
+ for(let i=0;i<3;i++)records.push(rec('n'+i,'Tainan','Food'));
+ records.push(rec('t0','Taipei','Tips'));
+ const cats=[{name:'Food'},{name:'Shops'},{name:'Acts'},{name:'Tips'}];
+ const res=C.autoFill(records,cats,[{name:'Tainan',days:1},{name:'Taipei',days:3},{name:'Jiufen',days:0}],{include:['Food','Shops','Acts']});
+ assert.equal(res.days,4);
+ assert.deepEqual(res.dayCities,{1:['Tainan'],2:['Taipei'],3:['Taipei'],4:['Taipei']},'in the order given');
+ const on=d=>res.stops.filter(x=>x.day===d).map(x=>x.recordId);
+ assert.deepEqual(on(1),['n0','n1','n2']);
+ assert.deepEqual([2,3,4].map(d=>on(d).length),[8,8,8],'at most 8 a day');
+ assert.deepEqual(res.left,{Taipei:4},'what did not fit is counted');
+ assert.ok([2,3,4].every(d=>['f','s','a'].every(k=>on(d).some(id=>id[0]===k))),'every day has food, shops and things to do');
+ const dayOf=id=>res.stops.find(x=>x.recordId===id)?.day;
+ assert.deepEqual(['f0','f1','f2'].map(dayOf),[2,3,4],'named places first, one on each day');
+ assert.ok(['f9','f10','f11'].some(id=>!dayOf(id)),'what does not fit is from the end of the list');
+ assert.ok(!res.stops.some(x=>x.recordId==='t0'),'only the chosen categories');
+ assert.equal(new Set(res.stops.map(x=>x.recordId)).size,res.stops.length,'each clip once');
+ assert.deepEqual(res.stops.map(x=>x.day),res.stops.map(x=>x.day).slice().sort((a,b)=>a-b),'in day order');
+ assert.equal(C.autoFill(records,cats,[{name:'Taipei',days:0}]).days,0);
+});
 test('by city: every clip sorted into its city, then its category, separate from the days',()=>{
  const rec=(id,city,category,country='Taiwan')=>({id,city,category,country,title:id});
  const records=[rec('a','Taipei','Taiwan · Food'),rec('b','Tainan','Taiwan · Food'),rec('c','taipei ','Taiwan · Shopping'),

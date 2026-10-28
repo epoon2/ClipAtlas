@@ -704,6 +704,128 @@
     return out;
   }
 
+  /* ---- Trip overview and auto-fill --------------------------------------- */
+  const most = m => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
+  /** A clip's country: its own, or the one most used for its city by the other clips. */
+  function countryLookup(records) {
+    const byCity = new Map(cityList(records).map(c => [cityKey(c.name), c.country]));
+    return r => safeString(r && r.country) || byCity.get(cityKey(r && r.city)) || '';
+  }
+  /** Countries the saved clips are in, most clips first: [{country, count}]. */
+  function tripCountries(records) {
+    const countryOf = countryLookup(records), by = new Map();
+    for (const r of records || []) {
+      const name = countryOf(r), k = name.toLowerCase(); if (!k) continue;
+      if (!by.has(k)) by.set(k, { spellings: new Map(), count: 0 });
+      const c = by.get(k); c.count++; c.spellings.set(name, (c.spellings.get(name) || 0) + 1);
+    }
+    return [...by.values()].map(c => ({ country: most(c.spellings), count: c.count }))
+      .sort((a, b) => b.count - a.count || a.country.localeCompare(b.country));
+  }
+  /** What the saved clips of one country ('' for all) add up to, for planning:
+      {total, noCity, categories: [{category, count}], cities: [{name, country,
+      count, categories: [{category, count}], places: [name, …]}]}. Cities with the
+      most clips first; categories in the person's order; places are the named
+      restaurants, shops and sights, each once. */
+  /** The saved clips of one country ('' for all), by their own country or their city's. */
+  function tripRecords(records, country = '') {
+    const countryOf = countryLookup(records), want = safeString(country).toLowerCase();
+    return (records || []).filter(r => !want || countryOf(r).toLowerCase() === want);
+  }
+  function tripOverview(records, categories, country = '') {
+    const mine = tripRecords(records, country);
+    const board = cityBoard(mine, categories, []);
+    const order = new Map((categories || []).map((c, i) => [c.name, i]));
+    const rank = name => name === 'Unsorted' ? Infinity : order.has(name) ? order.get(name) : 1e6;
+    const totals = new Map();
+    for (const r of mine) { const c = safeString(r.category) || 'Unsorted'; totals.set(c, (totals.get(c) || 0) + 1); }
+    const cities = board.filter(c => c.name).map(c => {
+      const seen = new Set(), places = [];
+      for (const g of c.groups) for (const { record } of g.items) {
+        const place = safeString(record.place).replace(/\s+/g, ' ').slice(0, 80), k = place.toLowerCase();
+        if (place && !seen.has(k)) { seen.add(k); places.push(place); }
+      }
+      return { name: c.name, country: c.country, count: c.count, places,
+        categories: c.groups.map(g => ({ category: g.category, count: g.items.length })) };
+    });
+    const unknown = board.find(c => !c.name);
+    return { total: mine.length, noCity: unknown ? unknown.count : 0, cities,
+      categories: [...totals.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
+        .map(([category, count]) => ({ category, count })) };
+  }
+  /** How many days to give each city of a ``days``-day trip, in the order given:
+      [{name, days}]. One day each (most clips first) while days last, then each
+      next day to the busiest city (most clips per day so far); never more days
+      than a city has clips, so a few days can be left free. */
+  function suggestDays(cities, days) {
+    const list = (cities || []).map(c => ({ name: c.name, count: Math.max(0, Number(c.count) || 0), days: 0 }));
+    const order = list.map((_, i) => i).sort((a, b) => list[b].count - list[a].count || a - b);
+    let left = cleanDayCount(days);
+    for (const i of order) { if (!left || !list[i].count) break; list[i].days = 1; left--; }
+    while (left > 0) {
+      let best = -1;
+      for (const i of order) {
+        const c = list[i]; if (!c.days || c.days >= c.count) continue;
+        if (best < 0 || c.count / c.days > list[best].count / list[best].days) best = i;
+      }
+      if (best < 0) break;
+      list[best].days++; left--;
+    }
+    return list.map(({ name, days }) => ({ name, days }));
+  }
+  /** A draft itinerary from [{name, days}] (cities in trip order): each city's
+      days in a row, and its clips spread over them, a mix of categories (taken
+      in turn, in the person's category order), clips with a named place first,
+      at most ``perDay`` stops a day. ``include`` (a list of category names)
+      limits which clips go on days. Returns {days, dayCities, stops: [{recordId,
+      day}], left: {city: clips that did not fit}}. */
+  function autoFill(records, categories, cityDays, { include = null, perDay = 8 } = {}) {
+    const order = new Map((categories || []).map((c, i) => [c.name, i]));
+    const rank = name => name === 'Unsorted' ? Infinity : order.has(name) ? order.get(name) : 1e6;
+    const allowed = include ? new Set(include) : null;
+    const dayCities = {}, stops = [], left = {};
+    let day = 0;
+    for (const c of cityDays || []) {
+      const n = Math.max(0, Math.round(Number(c.days) || 0)), name = cityName(c.name);
+      if (!n || !name || day + n > MAX_DAYS) continue;
+      const first = day + 1;
+      for (let d = first; d < first + n; d++) dayCities[d] = [name];
+      day += n;
+      // This city's clips by category, named places first.
+      const groups = new Map();
+      for (const r of records || []) {
+        if (cityKey(r.city) !== cityKey(name)) continue;
+        const category = safeString(r.category) || 'Unsorted';
+        if (allowed && !allowed.has(category)) continue;
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push(r);
+      }
+      const queues = [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
+        .map(([, list]) => list.filter(r => safeString(r.place)).concat(list.filter(r => !safeString(r.place))));
+      // Take one from each category in turn; each goes on the day with the fewest of
+      // its category so far (then the emptiest day), so every day gets a mix.
+      const loads = new Array(n).fill(0), mix = queues.map(() => new Array(n).fill(0));
+      let missed = 0;
+      while (queues.some(q => q.length)) {
+        queues.forEach((q, k) => {
+          if (!q.length) return;
+          const r = q.shift();
+          let at = -1;
+          for (let i = 0; i < n; i++) {
+            if (loads[i] >= perDay) continue;
+            if (at < 0 || mix[k][i] < mix[k][at] || (mix[k][i] === mix[k][at] && loads[i] < loads[at])) at = i;
+          }
+          if (at < 0) { missed++; return; }
+          loads[at]++; mix[k][at]++; stops.push({ recordId: r.id, day: first + at });
+        });
+      }
+      if (missed) left[name] = (left[name] || 0) + missed;
+    }
+    // Stops in day order, keeping the order they were dealt in within a day.
+    stops.sort((a, b) => a.day - b.day);
+    return { days: day, dayCities, stops, left };
+  }
+
   function planMarkdown(items, records, title, dayCities = {}) {
     const byId = new Map(records.map(v => [v.id, v]));
     const groups = new Map();
@@ -731,5 +853,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripRecords, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

@@ -34,7 +34,7 @@ const records = [
   clip('Din Tai Fung original', 'Taiwan · Food', 'taipei '),        // the same city, written differently
   clip('Tainan breakfast crawl', 'Taiwan · Food', 'Tainan'),
   clip('Anping old fort', 'Taiwan · Activities', 'Tainan'),
-  clip('Airport tips', 'Travel tips', ''),
+  clip('Airport tips', 'Travel tips', '', { country: 'Taiwan' }),   // in Taiwan, no city
 ];
 const categories = [
   { id: 'c1', name: 'Taiwan · Food', emoji: '🍜', words: [] }, { id: 'c2', name: 'Taiwan · Shopping', emoji: '🛍️', words: [] },
@@ -115,6 +115,44 @@ const after = await page.$$eval('#itineraryDays .day-panel', els => els.map(e =>
 check('going down to 2 days keeps every stop and clears day 3\'s city', JSON.stringify(after) === '[[["Taipei"],1],[["Tainan"],3]]', JSON.stringify(after));
 const away = await page.$$eval('#itineraryDays .stop-away', els => els.map(e => e.closest('.stop').querySelector('h4').textContent + ': ' + e.textContent));
 check('a stop in another city than its day\'s says so', JSON.stringify(away) === '["Beef noodles at Lin Dong Fang: not in Tainan"]', JSON.stringify(away));
+
+// Overview: what the Taiwan clips add up to, days per city, and Fill the days (with Undo).
+await page.click('[data-itinerary-view="overview"]');
+const sum = await page.textContent('.overview-sum');
+check('the overview sums up the country\'s clips', /^8 clips in 2 cities/.test(sum) && /🍜 4 Food · 🛍️ 1 Shopping · 🏮 2 Activities · 🧳 1 Travel tips/.test(sum), sum);
+check('it names the country and says what has no city yet', /Taiwan \(8\)/.test(await page.textContent('#tripCountry')) &&
+  /^1 clip has no city yet/.test(await page.textContent('.overview-note')), await page.textContent('.overview-note'));
+const cityRows = () => page.$$eval('.trip-city', els => els.map(e => [e.querySelector('h3').firstChild.textContent.trim(), e.querySelector('[data-trip-days]').value]));
+check('each city with its days, taken from the days already set', JSON.stringify(await cityRows()) === '[["📍 Taipei","1"],["📍 Tainan","1"]]', JSON.stringify(await cityRows()));
+const places = await page.$$eval('.trip-city:first-child .trip-places .chip', els => els.map(e => e.textContent));
+check('a city lists its named places', JSON.stringify(places) === '["Lin Dong Fang"]', JSON.stringify(places));
+await page.uncheck('[data-trip-include="Travel tips"]');
+await page.click('.trip-city:nth-child(2) [data-action="trip-move"][data-step="-1"]');
+await page.fill('[data-trip-days="Taipei"]', '2'); await page.press('[data-trip-days="Taipei"]', 'Tab');
+check('days and order can be changed, and it says what the trip becomes', JSON.stringify(await cityRows()) === '[["📍 Tainan","1"],["📍 Taipei","2"]]' &&
+  /3 days · Tainan 1 → Taipei 2The trip becomes 3 days\./.test(await page.textContent('.overview-foot')), await page.textContent('.overview-foot'));
+const before = await page.$$eval('#itineraryDays .day-panel', els => els.map(e => e.querySelectorAll('.stop').length));
+await page.click('[data-action="trip-fill"]');
+await page.waitForSelector('#itineraryDays:not([hidden])');
+const filled = await page.$$eval('#itineraryDays .day-panel', els => els.map(e => [[...e.querySelectorAll('.city-chip')].map(c => c.firstChild.textContent).join(),
+  [...e.querySelectorAll('.stop h4')].map(h => h.textContent)]));
+check('Fill the days: each city on its days, its clips spread with a mix, named places first', JSON.stringify(filled) === JSON.stringify([
+  ['Tainan', ['Tainan breakfast crawl', 'Anping old fort']],
+  ['Taipei', ['Beef noodles at Lin Dong Fang', 'Taipei 101 at sunset', 'Raohe night market']],
+  ['Taipei', ['Ximending shopping street', 'Din Tai Fung original']]]), JSON.stringify(filled));
+check('it says what it did and offers Undo', /^Filled 3 days with 7 stops\./.test(await page.textContent('#toast')) && await page.isVisible('#toast .toast-action'),
+  await page.textContent('#toast'));
+await page.click('#toast .toast-action');
+const undone = await page.$$eval('#itineraryDays .day-panel', els => els.map(e => e.querySelectorAll('.stop').length));
+check('Undo puts the days back as they were', JSON.stringify(undone) === JSON.stringify(before) && await page.inputValue('#dayCount') === '2', JSON.stringify([before, undone]));
+await page.click('[data-itinerary-view="overview"]');
+await page.screenshot({ path: '/tmp/clipatlas-itinerary-overview.png', fullPage: true });
+await page.setViewportSize({ width: 390, height: 844 });
+const wideOverview = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+check('the overview fits a phone screen', !wideOverview);
+await page.screenshot({ path: '/tmp/clipatlas-itinerary-overview-phone.png', fullPage: true });
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.click('[data-itinerary-view="days"]');
 
 // Saved to the account: the cities are still there after a reload.
 await page.waitForTimeout(500);   // the save starts a moment after a change

@@ -204,7 +204,7 @@ check('the sound of both videos was recorded and sent as 16 kHz WAV (the silent 
   heard.length === 2 && heard.every(a => a.rate === 16000 && a.seconds > 1.5 && a.loudness > 0.01),
   JSON.stringify(heard.map(a => ({ s: a.seconds.toFixed(1), l: a.loudness.toFixed(3) }))));
 check('each clip was decided once, in JSON mode, from the transcript, what was seen and the categories', decided.length === 3 &&
-  decided.every(a => a.json && /BEST BEEF NOODLES TAIPEI/.test(a.prompt) && /- Food:/.test(a.prompt)) &&
+  decided.every(a => a.json && /BEST BEEF NOODLES TAIPEI/.test(a.prompt) && /- Food \(for example: /.test(a.prompt)) &&
   decided.filter(a => /best beef noodles/.test(a.prompt)).length === 2);
 
 // What each sheet of screenshots shows: one color per panel, read from the middle of each 360-wide panel.

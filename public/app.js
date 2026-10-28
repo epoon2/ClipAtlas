@@ -151,17 +151,84 @@
       return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||[r.auto.reason,r.auto.detail].filter(Boolean).join(': '))}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
-  // The Itinerary page has two views: the days, and every saved clip sorted by city.
-  let itineraryView='days';
+  // The Itinerary page has three views: an overview of what the clips add up to (with
+  // Fill the days), the days, and every saved clip sorted by city.
+  let itineraryView=null;
+  // The overview's choices: which country, which categories go on days, and each city's days in trip order.
+  let trip=null;
   const dayCitiesOf=day=>(state.dayCities&&state.dayCities[day])||[];
   const dayLabel=day=>{const c=dayCitiesOf(day);return `Day ${day}${c.length?' · '+c.join(', '):''}`;};
   function renderItinerary() {
     $('#tripTitle').value=state.tripTitle||''; $('#dayCount').value=String(state.dayCount||7);
+    if(!itineraryView)itineraryView=state.plan.length?'days':'overview';
     for(const b of $$('[data-itinerary-view]')){const on=b.dataset.itineraryView===itineraryView;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));}
-    $('#itineraryDays').hidden=itineraryView!=='days';$('#itineraryCities').hidden=itineraryView!=='cities';
+    $('#itineraryOverview').hidden=itineraryView!=='overview';$('#itineraryDays').hidden=itineraryView!=='days';$('#itineraryCities').hidden=itineraryView!=='cities';
     const known=C.cityList(state.records);
     $('#cityOptions').innerHTML=known.map(c=>`<option value="${html(c.name)}">${html(c.country?c.country+' · ':'')}${c.count} saved</option>`).join('');
-    if(itineraryView==='cities')renderCityBoard();else renderDays();
+    if(itineraryView==='cities')renderCityBoard();else if(itineraryView==='overview')renderOverview();else renderDays();
+  }
+  const plural=(n,one,many)=>`${n} ${n===1?one:many}`;
+  const shortCategory=name=>String(name).includes(' · ')?String(name).split(' · ').slice(1).join(' · '):name;
+  // The cities of the overview with their days: as the person set them, else the days' cities, else a suggestion.
+  function tripState(){
+    const countries=C.tripCountries(state.records);
+    if(!trip||(trip.country&&!countries.some(c=>c.country===trip.country)))trip={country:countries[0]?.country||'',include:null,cities:null,edited:false};
+    const o=C.tripOverview(state.records,categoryList(),trip.country),key=v=>String(v).toLowerCase();
+    const known=new Map(o.cities.map(c=>[key(c.name),c]));
+    if(!trip.cities||(!trip.edited&&trip.forDays!==state.dayCount)){
+      const fromDays=[];
+      for(let d=1;d<=state.dayCount;d++)for(const c of dayCitiesOf(d)){
+        if(!known.has(key(c)))continue;
+        const hit=fromDays.find(x=>key(x.name)===key(c));if(hit)hit.days++;else fromDays.push({name:known.get(key(c)).name,days:1});
+      }
+      trip.cities=fromDays.length?fromDays:C.suggestDays(o.cities,state.dayCount);trip.from=fromDays.length?'days':'suggested';
+      trip.forDays=state.dayCount;trip.edited=false;
+    }
+    // Cities that came or went since: keep the order, add new ones with no days.
+    trip.cities=trip.cities.filter(t=>known.has(key(t.name))).map(t=>({name:known.get(key(t.name)).name,days:t.days}));
+    for(const c of o.cities)if(!trip.cities.some(t=>key(t.name)===key(c.name)))trip.cities.push({name:c.name,days:0});
+    return {countries,o};
+  }
+  // What the saved clips of a country add up to, and how many days each city gets.
+  function renderOverview(){
+    const box=$('#itineraryOverview');
+    if(!state.records.length){box.innerHTML='<div class="day-empty">No saved clips yet. Import some, and this shows what they add up to.</div>';return;}
+    const {countries,o}=tripState(),byName=new Map(o.cities.map(c=>[c.name.toLowerCase(),c]));
+    const include=trip.include?new Set(trip.include):null,total=trip.cities.reduce((n,c)=>n+c.days,0);
+    let s=`<div class="overview-head"><label class="field small"><span>CLIPS FROM</span><select id="tripCountry">${countries.map(c=>`<option value="${html(c.country)}"${c.country===trip.country?' selected':''}>${html(c.country)} (${c.count})</option>`).join('')}<option value=""${trip.country===''?' selected':''}>Everywhere (${state.records.length})</option></select></label>`+
+      `<div class="overview-sum"><strong>${plural(o.total,'clip','clips')} in ${plural(o.cities.length,'city','cities')}</strong><span>${o.categories.map(c=>`${html(emojiFor(c.category))} ${c.count} ${html(shortCategory(c.category))}`).join(' · ')}</span></div></div>`;
+    if(o.noCity)s+=`<p class="overview-note">${plural(o.noCity,'clip has','clips have')} no city yet, so ${o.noCity===1?'it is':'they are'} not in a city below. <button type="button" class="link-inline" data-action="show-city" data-city="">See ${o.noCity===1?'it':'them'}</button> Auto-review fills in cities, or type one in Edit.</p>`;
+    if(!o.cities.length){box.innerHTML=s+'<div class="day-empty">None of these clips has a city yet. Run auto-review (or fill in cities in Edit), and the cities show here.</div>';return;}
+    s+=`<div class="overview-include"><span>PUT ON DAYS</span>${o.categories.map(c=>`<label class="toggle-chip"><input type="checkbox" data-trip-include="${html(c.category)}"${!include||include.has(c.category)?' checked':''} /> ${html(emojiFor(c.category))} ${html(shortCategory(c.category))}</label>`).join('')}</div><ol class="trip-cities">`;
+    trip.cities.forEach((t,i)=>{
+      const c=byName.get(t.name.toLowerCase());if(!c)return;
+      const cats=c.categories.map(g=>`<span title="${html(g.category)}">${html(emojiFor(g.category))} ${g.count} ${html(shortCategory(g.category))}</span>`).join('');
+      const places=c.places.slice(0,8).map(p=>`<span class="chip">${html(p)}</span>`).join('')+(c.places.length>8?`<span class="chip more">+${c.places.length-8} more</span>`:'');
+      s+=`<li class="trip-city${t.days?'':' no-days'}"><div class="trip-city-main"><h3>📍 ${html(c.name)} <small>${plural(c.count,'clip','clips')}${c.places.length?' · '+plural(c.places.length,'named place','named places'):''}</small></h3><p class="trip-cats">${cats}</p>${places?`<div class="chips trip-places">${places}</div>`:''}</div>`+
+        `<div class="trip-city-days"><label><span>DAYS</span><input type="number" min="0" max="30" step="1" inputmode="numeric" value="${t.days}" data-trip-days="${html(c.name)}" aria-label="Days in ${html(c.name)}" /></label><div class="trip-move"><button type="button" data-action="trip-move" data-city="${html(c.name)}" data-step="-1"${i===0?' disabled':''} aria-label="${html(c.name)} earlier in the trip">↑</button><button type="button" data-action="trip-move" data-city="${html(c.name)}" data-step="1"${i===trip.cities.length-1?' disabled':''} aria-label="${html(c.name)} later in the trip">↓</button></div></div></li>`;
+    });
+    const route=trip.cities.filter(t=>t.days>0).map(t=>`${html(t.name)} ${t.days}`).join(' → ');
+    const fit=total>state.dayCount?`The trip becomes ${total} days.`:total<state.dayCount?`${plural(state.dayCount-total,'day stays','days stay')} free (of ${state.dayCount}).`:`All ${state.dayCount} days have a city.`;
+    s+=`</ol><div class="overview-foot"><div><strong>${plural(total,'day','days')}</strong>${route?' · '+route:''}<small>${fit}${trip.from==='suggested'&&!trip.edited?' Suggested from how many clips each city has; change the days or the order.':''}</small></div>`+
+      `<div class="overview-actions"><button type="button" class="btn-light" data-action="trip-suggest">Suggest again</button><button type="button" class="btn-primary" data-action="trip-fill"${total?'':' disabled'}>Fill the days</button></div></div>`+
+      '<p class="hint">Fill the days puts each city on its days, in this order, and spreads its clips over them: a mix of categories, named places first, at most 8 stops a day. It replaces the days you have now (you can undo it), and then you can change anything in Days and By city.</p>';
+    box.innerHTML=s;
+  }
+  function fillDays(){
+    tripState();
+    const recs=C.tripRecords(state.records,trip.country).sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
+    const res=C.autoFill(recs,categoryList(),trip.cities,{include:trip.include});
+    if(!res.days){toast('Give at least one city a day first.');return;}
+    const had=state.plan.length,hadCities=Object.keys(state.dayCities||{}).length;
+    if((had||hadCities)&&!confirm(`Fill the days? This replaces your current days (${plural(had,'stop','stops')}${hadCities?', and the cities set for '+plural(hadCities,'day','days'):''}). You can undo it right after.`))return;
+    const before={plan:state.plan,dayCities:state.dayCities,dayCount:state.dayCount};
+    const days=C.cleanDayCount(Math.max(state.dayCount,res.days)),stamp=Date.now().toString(36);
+    state.dayCount=days;state.dayCities=C.cleanDayCities(res.dayCities,days);
+    state.plan=res.stops.map((x,i)=>({id:`stop-${stamp}-${i}`,recordId:x.recordId,day:x.day,note:''}));
+    trip.edited=false;trip.cities=null;itineraryView='days';commit();
+    const extra=Object.values(res.left).reduce((a,b)=>a+b,0);
+    toast(`Filled ${plural(res.days,'day','days')} with ${plural(res.stops.length,'stop','stops')}.${extra?` ${plural(extra,'more clip','more clips')} did not fit (at most 8 a day) and ${extra===1?'is':'are'} still in By city.`:''}`,
+      {label:'Undo',run:()=>{state.plan=before.plan;state.dayCities=before.dayCities;state.dayCount=before.dayCount;trip.cities=null;commit();toast('Your days are back as they were.');}});
   }
   function renderDays() {
     const days=$('#itineraryDays'); const byId=new Map(state.records.map(r=>[r.id,r]));
@@ -1236,6 +1303,10 @@
       else if(kind==='show-city')showCity(action.dataset.city);
       else if(kind==='jump-city'){const panel=[...$$('#itineraryCities .city-panel')].find(p=>p.dataset.cityKey===action.dataset.city.toLowerCase());if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}}
       else if(kind==='itinerary-view'){itineraryView=action.dataset.itineraryView;renderItinerary();}
+      else if(kind==='trip-move'&&trip){const i=trip.cities.findIndex(t=>t.name===action.dataset.city),j=i+Number(action.dataset.step);
+        if(i>=0&&j>=0&&j<trip.cities.length){[trip.cities[i],trip.cities[j]]=[trip.cities[j],trip.cities[i]];trip.edited=true;renderOverview();}}
+      else if(kind==='trip-suggest'&&trip){const {o}=tripState();trip.cities=C.suggestDays(o.cities,state.dayCount);trip.from='suggested';trip.edited=false;trip.forDays=state.dayCount;renderOverview();}
+      else if(kind==='trip-fill'&&trip)fillDays();
       else if(kind==='up')movePlan(id,-1);else if(kind==='down')movePlan(id,1);
     });
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
@@ -1270,6 +1341,19 @@
     $('#itineraryDays').addEventListener('keydown',evt=>{
       const t=evt.target;if(!t.dataset.dayCity||evt.key!=='Enter')return;
       evt.preventDefault();if(!addDayCity(Number(t.dataset.dayCity),t.value))t.value='';
+    });
+    $('#itineraryOverview').addEventListener('change',evt=>{
+      const t=evt.target;if(!trip)return;
+      if(t.id==='tripCountry'){trip={country:t.value,include:null,cities:null,edited:false};}
+      else if(t.dataset.tripInclude!==undefined){
+        const all=C.tripOverview(state.records,categoryList(),trip.country).categories.map(c=>c.category);
+        const on=new Set(trip.include||all);t.checked?on.add(t.dataset.tripInclude):on.delete(t.dataset.tripInclude);
+        trip.include=all.every(c=>on.has(c))?null:[...on];
+      }
+      else if(t.dataset.tripDays!==undefined){const hit=trip.cities.find(x=>x.name===t.dataset.tripDays);
+        if(hit){hit.days=Math.max(0,Math.min(C.MAX_DAYS,Math.round(Number(t.value))||0));trip.edited=true;}}
+      else return;
+      renderOverview();
     });
     $('#itineraryCities').addEventListener('change',evt=>{
       if(evt.target.dataset.cityPlan)planOnDay(evt.target.dataset.cityPlan,Number(evt.target.value));

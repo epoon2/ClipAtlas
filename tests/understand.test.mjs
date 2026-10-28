@@ -81,7 +81,10 @@ test('only the person\'s own categories, short fields and a few tags are kept', 
 
 test('the prompt carries the categories, the transcript and what was seen, and asks for no guessing', () => {
   const p = buildPrompt(CATEGORIES, 'hello there', 'A bowl of noodles. Text on it: BEST NOODLES');
-  assert.match(p, /- Food: restaurant, noodles/);
+  assert.match(p, /- Food \(for example: restaurant, noodles\)/);
+  assert.match(buildPrompt([{ name: 'Taiwan · Food', words: ['taipei+food'] }], '', ''), /Taiwan · Food \(for example: taipei food\)/, 'a + reads as two words');
+  assert.match(p, /choose it over general categories such as "Other"/);
+  assert.ok(p.indexOf('"country"') < p.indexOf('"category"'), 'where it is, then the category');
   assert.match(p, /hello there/);
   assert.match(p, /BEST NOODLES/);
   assert.match(p, /Never guess a place/);
