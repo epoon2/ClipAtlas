@@ -698,25 +698,33 @@
         if(auto.failsInRow>=3){stopReason=`Three clips in a row failed, so auto-review stopped.${auto.lastDetail?' Last problem: '+auto.lastDetail+'.':''} "Check the AI setup" tests each step.`;auto.stop=true;return false;}
         return true;
       };
-      // The clip before's AI work runs while this one plays; its result is saved once this one has played.
-      let pending=null;
-      const settle=async()=>{
-        if(!pending)return true;
-        const {r,work,meta}=pending;pending=null;
-        return keep(r,await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)})),meta);
+      // Each clip's AI work runs while the next clips play; results are saved in order.
+      // At most two clips wait for their AI work, so a slow AI step cannot pile up.
+      let chain=Promise.resolve(true);const waiting=[];
+      const later=(r,work,meta)=>{
+        const item={finished:false};
+        item.promise=chain=chain.then(async go=>{
+          if(!go){item.finished=true;return false;}
+          const res=await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)}));
+          const more=await keep(r,res,meta);item.finished=true;
+          if(!more)auto.finishClip?.('STOPPED_BY_RUN');  // cut the clip that is playing now
+          return more;
+        });
+        waiting.push(item);
       };
       for(;auto.index<auto.queue.length&&!auto.stop;auto.index++){
+        while(waiting.filter(i=>!i.finished).length>=2)await waiting.find(i=>!i.finished).promise;
+        if(auto.stop)break;
         const r=state.records.find(x=>x.id===auto.queue[auto.index]);if(!r)continue;
         autoCounts();
         const clipStarted=Date.now(),pausedBefore=auto.pausedMs;
         const got=await autoPlayClip(r);
         const meta={ms:Date.now()-clipStarted-(auto.pausedMs-pausedBefore),shots:got.played?got.played.shots.length:0,slides:got.played?got.played.slides:0};
         if(got.done&&(got.done.reason==='SHARING_STOPPED'||got.done.reason==='STOPPED'))break;  // nothing saved for a clip cut short
-        if(!await settle())break;
-        if(got.done){if(!await keep(r,got.done,meta))break;continue;}
-        pending={r,work:autoAnalyze(r,got),meta};
+        later(r,got.done?Promise.resolve(got.done):autoAnalyze(r,got),meta);
       }
-      if(pending){autoSay('Finishing the last clip…');await settle();}
+      if(waiting.some(i=>!i.finished))autoSay('Finishing the last clips…');
+      await chain;
     }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
     finally{
       clearInterval(auto.clock);autoTime();
@@ -899,6 +907,9 @@
         clearInterval(timer);window.removeEventListener('message',onMessage);document.removeEventListener('visibilitychange',onVisible);
         if(paused){auto.pausedMs+=Date.now()-pausedAt;auto.pausedSince=0;}
         record(false);send('pause');auto.finishClip=null;
+        // Take the player away at once, so its end card does not stay up while the next clip loads.
+        const note=document.createElement('p');note.className='player-none';note.textContent='Next clip…';
+        frame.remove();box.replaceChildren(note);
         resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError});
       };
       auto.finishClip=finish;
@@ -921,7 +932,7 @@
           // Not in the first 1.5 seconds: the shared tab can still show the clip before.
           while(times&&times.length&&t>=times[0]&&Date.now()-ready>=1500){times.shift();shoot();}
           if(!paused)autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s`);
-          if(t>=length-0.25)finish('ENDED');
+          if(t>=length-0.5)finish('ENDED');
         }
         else if(d.type==='onPlayerError'||d.type==='onError'){
           const code=Number(v.errorCode??d.value);
@@ -950,6 +961,8 @@
           if(s>=2&&shots.length<1)shoot();if(s>=6&&shots.length<2)shoot();if(s>=10&&shots.length<3)shoot();
           if(s>=12)finish('NO_TIME');
         }
+        // The last second or two: when the clock stops, TikTok's end card is up. Move on.
+        if(timeEvents&&length<MAX_VIDEO&&now>=length-2&&t-lastTick>1200)return finish('ENDED');
         if(timeEvents&&t-lastTick>15000)finish(shots.length?'STALLED_PART':'STALLED');
         if(t-started>(length+60)*1000)finish('TIMEOUT');
       },500);
@@ -960,7 +973,7 @@
   async function autoPlayClip(r){
     const played=await autoPlay(r);
     if(played.reason==='SHARING_STOPPED')return {done:{reason:'SHARING_STOPPED'}};
-    if(played.reason==='STOPPED_BY_PERSON')return {done:{reason:'STOPPED'}};
+    if(played.reason==='STOPPED_BY_PERSON'||played.reason==='STOPPED_BY_RUN')return {done:{reason:'STOPPED'}};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
       return {done:{status:'unavailable',reason:played.reason,detail:played.error?`player error ${played.error}`:''}};
     return {played,parts:autoAudio(),images:auto.mode==='transcript'?[]:autoSheets(played.shots)};

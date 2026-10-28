@@ -72,8 +72,12 @@ else {
     if (d.type === 'play' && !timer && t < duration) {
       const ctx = new AudioContext(); osc = ctx.createOscillator(); osc.frequency.value = 330; osc.connect(ctx.destination); osc.start();
       post('onStateChange', 1);
-      timer = setInterval(() => { t = Math.min(duration, t + 0.25 * speed); post('onCurrentTime', { currentTime: t, duration });
-        if (t >= duration) { clearInterval(timer); timer = null; osc.stop(); post('onStateChange', 0); } }, 250);
+      // The long one, like TikTok's player, stops reporting the time near the end and shows its end card
+      // ("Watch this video on TikTok") without saying it ended.
+      const lastTime = speed > 1 ? 98.5 : duration;
+      timer = setInterval(() => { t = Math.min(lastTime, t + 0.25 * speed); post('onCurrentTime', { currentTime: t, duration });
+        if (t >= lastTime) { clearInterval(timer); timer = null; osc.stop(); if (speed === 1) post('onStateChange', 0);
+          else document.body.innerHTML = '<p style="color:#fff">Watch this video on TikTok</p>'; } }, 250);
     }
     if (d.type === 'pause') { clearInterval(timer); timer = null; try { osc && osc.stop(); } catch (_) {} post('onStateChange', 2); }
   });
@@ -149,6 +153,7 @@ check('the run says how long it took', /^Took \d+:\d\d · \d+:\d\d a clip on ave
 const facts = await page.$$eval('#autoResults li small', els => els.map(e => e.textContent));
 check('each clip says what was heard and read, and how long it took', facts.length === 4 && facts.filter(f => !f).length === 1 &&
   facts.filter(f => /^\d+ words heard · \d+ screenshots · \d+:\d\d$/.test(f)).length === 2 &&
+  facts.some(f => /^\d+ words heard · 17 screenshots · 0:(0\d|1[0-4])$/.test(f)) &&  // no long wait on the end card
   facts.some(f => /^no speech heard · 4 slides · 0:(0\d|1\d)$/.test(f)), JSON.stringify(facts));
 check('the run finishes and says what happened', /^Done\. 3 filled in, 0 nothing heard or seen, 1 would not play, 0 failed\./.test(summary), summary);
 await page.screenshot({ path: process.env.SHOT || '/tmp/clipatlas-auto.png' });
@@ -171,8 +176,8 @@ const red = ([r, g, b]) => r > 150 && g < 90 && b < 90;
 const videoSheets = sheets.filter(s => s.panels.every(red)), slideSheets = sheets.filter(s => !s.panels.some(red));
 check('video screenshots show the player itself', videoSheets.every(s => s.h === 640 && s.w >= 360), JSON.stringify(videoSheets));
 const videoShots = videoSheets.map(s => s.panels.length);
-check('a 100-second video is watched to its end: eighteen screenshots across it, on six sheets (the 3-second one: two)',
-  JSON.stringify(videoShots.slice().sort()) === JSON.stringify([2, 3, 3, 3, 3, 3, 3]), JSON.stringify(videoShots) + ' ' + traces.join(' ; '));
+check('a 100-second video is watched to its end: seventeen screenshots across it (the player stops at 98.5s), on six sheets (the 3-second one: two)',
+  JSON.stringify(videoShots.slice().sort()) === JSON.stringify([2, 2, 3, 3, 3, 3, 3]), JSON.stringify(videoShots) + ' ' + traces.join(' ; '));
 const slideColors = slideSheets.flatMap(s => s.panels.map(([r, g, b]) => Math.abs(r - g) < 25 && Math.abs(g - b) < 25 ? 'gray' : r > 200 ? 'orange' : b > 150 && r < 90 ? 'blue' : g > 120 ? 'green' : 'purple'));
 check('every slide was screenshotted once it had loaded (never the gray loading picture), in order, on two sheets', slideSheets.length === 2 &&
   JSON.stringify(slideColors) === JSON.stringify(['blue', 'green', 'orange', 'purple']), JSON.stringify(slideSheets.map(s => s.panels)));
