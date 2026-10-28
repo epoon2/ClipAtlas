@@ -7,7 +7,7 @@
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   const html = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
-  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7 });
+  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7, dayCities: {} });
   let state = emptyState();
   let currentTab = 'library', activeCollection = '', editingId = null, saveTimer = null;
   let selecting = false; const selected = new Set();  // choosing many clips at once
@@ -151,22 +151,81 @@
       return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||[r.auto.reason,r.auto.detail].filter(Boolean).join(': '))}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
     }).join('');
   }
+  // The Itinerary page has two views: the days, and every saved clip sorted by city.
+  let itineraryView='days';
+  const dayCitiesOf=day=>(state.dayCities&&state.dayCities[day])||[];
+  const dayLabel=day=>{const c=dayCitiesOf(day);return `Day ${day}${c.length?' · '+c.join(', '):''}`;};
   function renderItinerary() {
     $('#tripTitle').value=state.tripTitle||''; $('#dayCount').value=String(state.dayCount||7);
+    for(const b of $$('[data-itinerary-view]')){const on=b.dataset.itineraryView===itineraryView;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));}
+    $('#itineraryDays').hidden=itineraryView!=='days';$('#itineraryCities').hidden=itineraryView!=='cities';
+    const known=C.cityList(state.records);
+    $('#cityOptions').innerHTML=known.map(c=>`<option value="${html(c.name)}">${html(c.country?c.country+' · ':'')}${c.count} saved</option>`).join('');
+    if(itineraryView==='cities')renderCityBoard();else renderDays();
+  }
+  function renderDays() {
     const days=$('#itineraryDays'); const byId=new Map(state.records.map(r=>[r.id,r]));
+    const planned=new Set(state.plan.map(p=>p.recordId));
+    const choices=day=>Array.from({length:state.dayCount},(_,i)=>`<option value="${i+1}" ${day===i+1?'selected':''}>${html(dayLabel(i+1))}</option>`).join('');
     let s='';
     for(let day=1;day<=state.dayCount;day++){
-      const items=state.plan.filter(p=>p.day===day&&byId.has(p.recordId));
-      s+=`<section class="day-panel"><div class="day-head"><span class="day-num">${String(day).padStart(2,'0')}</span><h3>Day ${day}</h3><small>${items.length} ${items.length===1?'stop':'stops'}</small></div>`;
-      if(!items.length)s+='<div class="day-empty">Add stops from Discoveries using the “+ Plan” button.</div>';
+      const items=state.plan.filter(p=>p.day===day&&byId.has(p.recordId)),cities=dayCitiesOf(day);
+      const chips=cities.map(c=>`<span class="city-chip">${html(c)}<button type="button" data-action="day-city-remove" data-day="${day}" data-city="${html(c)}" aria-label="Take ${html(c)} off day ${day}">✕</button></span>`).join('');
+      s+=`<section class="day-panel"><div class="day-head"><span class="day-num">${String(day).padStart(2,'0')}</span><div class="day-title"><h3>Day ${day}</h3><div class="day-cities">${chips}${cities.length<6?`<input list="cityOptions" data-day-city="${day}" placeholder="${cities.length?'+ another city':'+ city for this day'}" aria-label="Add a city to day ${day} (type or pick, then Enter)" autocomplete="off" />`:''}</div></div><small>${items.length} ${items.length===1?'stop':'stops'}</small></div>`;
+      // What is still waiting in this day's cities.
+      const waiting=cities.map(c=>[c,state.records.filter(r=>r.city&&r.city.trim().toLowerCase()===c.toLowerCase()&&!planned.has(r.id)).length]).filter(([,n])=>n);
+      if(waiting.length)s+=`<p class="day-more">${waiting.map(([c,n])=>`${n} saved in ${html(c)} not planned yet <button type="button" class="link-inline" data-action="show-city" data-city="${html(c)}">Show them</button>`).join(' · ')}</p>`;
+      if(!items.length)s+=`<div class="day-empty">${cities.length?'Pick stops for this day in <strong>By city</strong>, or':'Add stops from Discoveries with'} the “+ Plan” button${cities.length?' in Discoveries':''}.</div>`;
       for(let j=0;j<items.length;j++){
         const entry=items[j],r=byId.get(entry.recordId);
-        const choices=Array.from({length:state.dayCount},(_,i)=>`<option value="${i+1}" ${day===i+1?'selected':''}>Day ${i+1}</option>`).join('');
-        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(r.title||r.place||'Saved TikTok')}</h4><p>${html([r.place,r.city,r.country].filter(Boolean).join(' · ')||r.category)}</p><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">View original TikTok ↗</a><input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
+        const away=cities.length&&r.city&&r.city.trim()&&!cities.some(c=>c.toLowerCase()===r.city.trim().toLowerCase());
+        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(r.title||r.place||'Saved TikTok')}</h4><p>${html([r.place,r.city,r.country].filter(Boolean).join(' · ')||r.category)}${away?` <span class="stop-away">not in ${html(cities.join(' or '))}</span>`:''}</p><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">View original TikTok ↗</a><input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices(day)}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
       }
       s+='</section>';
     }
     days.innerHTML=s;
+  }
+  // Every saved clip, by city, then by category: food, activities, shops… with a day picker on each.
+  function renderCityBoard() {
+    const recs=[...state.records].sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
+    const board=C.cityBoard(recs,categoryList(),state.plan),box=$('#itineraryCities');
+    if(!board.length){box.innerHTML='<div class="day-empty">No saved clips yet. Import some, and they show here by city.</div>';return;}
+    const options=day=>`<option value="0"${day?'':' selected'}>Not planned</option>`+Array.from({length:state.dayCount},(_,i)=>`<option value="${i+1}"${day===i+1?' selected':''}>${html(dayLabel(i+1))}</option>`).join('');
+    const named=board.filter(c=>c.name);
+    let s=named.length>1?`<nav class="city-jump" aria-label="Cities">${named.map((c,i)=>`<button type="button" class="chip" data-action="jump-city" data-city="${html(c.name)}">${html(c.name)} <small>${c.count}</small></button>`).join('')}</nav>`:'';
+    for(const c of board){
+      const days=c.name?Object.keys(state.dayCities||{}).map(Number).filter(d=>d<=state.dayCount&&dayCitiesOf(d).some(x=>x.toLowerCase()===c.name.toLowerCase())):[];
+      s+=`<details class="city-panel${c.name?'':' city-unknown'}" data-city-key="${html(c.name.toLowerCase())}"${c.name?' open':''}><summary><span class="city-name">${c.name?'📍 '+html(c.name):'City not known yet'}</span><small>${html([c.country,`${c.count} saved`,`${c.planned} planned`,days.length?'Day '+days.join(', '):''].filter(Boolean).join(' · '))}</small></summary>`;
+      if(!c.name)s+='<p class="hint city-note">Fill in a clip\'s city in Edit or Review mode (or let auto-review find it) and it moves into its city.</p>';
+      s+='<div class="city-groups">';
+      for(const g of c.groups){
+        s+=`<div class="city-group"><h4>${html(emojiFor(g.category))} ${html(g.category)} <small>${g.items.length}</small></h4><ul>`;
+        for(const {record:r,day} of g.items){
+          const where=[r.place&&r.place!==r.title?r.place:'',r.status!=='reviewed'?'needs review':''].filter(Boolean).join(' · ');
+          s+=`<li class="city-item${day?' planned':''}"><div class="city-item-text"><strong>${html(r.title||r.place||'Saved TikTok')}</strong>${where?`<span>${html(where)}</span>`:''}</div><div class="city-item-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok" aria-label="Open on TikTok">↗</a><select data-city-plan="${html(r.id)}" aria-label="Plan ${html(r.title||'this clip')} on a day">${options(day)}</select></div></li>`;
+        }
+        s+='</ul></div>';
+      }
+      s+='</div></details>';
+    }
+    box.innerHTML=s;
+  }
+  function showCity(name){
+    itineraryView='cities';renderItinerary();
+    const panel=[...$$('#itineraryCities .city-panel')].find(p=>p.dataset.cityKey===String(name).toLowerCase());
+    if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}
+  }
+  // Plan a clip on a day from By city (0 takes it off the itinerary). A moved stop goes to the end of its new day.
+  function planOnDay(recordId,day){
+    const at=state.plan.findIndex(p=>p.recordId===recordId);
+    if(!day){if(at>=0)state.plan.splice(at,1);commit();return;}
+    const entry=at>=0?state.plan.splice(at,1)[0]:{id:'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),recordId,note:''};
+    entry.day=day;state.plan.push(entry);commit();
+  }
+  function addDayCity(day,name){
+    const city=String(name||'').replace(/\s+/g,' ').trim();if(!city)return false;
+    const next={...(state.dayCities||{})};next[day]=[...dayCitiesOf(day),city];
+    state.dayCities=C.cleanDayCities(next,state.dayCount);commit();return true;
   }
   function render() {
     fillCategorySelect($('#categoryFilter'), true); fillCategorySelect($('#formCategory'), false); applyTabs();
@@ -207,9 +266,10 @@
   function addToPlan(id){
     const r=state.records.find(r=>r.id===id); if(!r)return;
     if(state.plan.some(p=>p.recordId===id)){toast('This discovery is already in your itinerary.');return;}
-    const day=1;
+    // It goes to the first day set to its city.
+    const day=C.dayForClip(r,state.dayCities,state.dayCount);
     state.plan.push({id:'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),recordId:id,day,note:''});
-    commit();toast('Added to Day 1. Open Itinerary to organize it.');
+    commit();toast(`Added to ${dayLabel(day)}. Open Itinerary to organize it.`);
   }
   function movePlan(id,offset){
     const a=state.plan.findIndex(p=>p.id===id);if(a<0)return;
@@ -250,10 +310,12 @@
           clean.records=C.mergeRecords([],Array.isArray(data.state.records)?data.state.records:[]).records;
           const inputPlan=Array.isArray(data.state.plan)?data.state.plan:[];
           const ids=new Set(clean.records.map(r=>r.id));
-          clean.plan=inputPlan.filter(p=>ids.has(p.recordId)&&Number(p.day)>=1&&Number(p.day)<=14);
+          clean.plan=inputPlan.filter(p=>ids.has(p.recordId)&&Number(p.day)>=1&&Number(p.day)<=C.MAX_DAYS);
           clean.collections=Array.isArray(data.state.collections)?data.state.collections.filter(x=>typeof x==='string'):[];
           clean.tripTitle=String(data.state.tripTitle||clean.tripTitle);
-          clean.dayCount=Math.max(3,Math.min(14,Number(data.state.dayCount)||7));
+          clean.dayCount=C.cleanDayCount(data.state.dayCount);
+          clean.plan.forEach(p=>{p.day=Math.min(Number(p.day),clean.dayCount);});
+          clean.dayCities=C.cleanDayCities(data.state.dayCities,clean.dayCount);
           if(Array.isArray(data.state.categories))clean.categories=C.normalizeCategories(data.state.categories);
           if(data.state.settings)clean.settings=data.state.settings;
           state=C.ensureSetup(clean).state;if(!Array.isArray(state.categories))state=C.applyStarter(state,'empty');
@@ -584,7 +646,8 @@
   function autoEstimate(){
     const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked,mode:$('#autoMode').value});
     $('#autoMarkWrap').hidden=$('#autoMode').value==='transcript';
-    const minutes=Math.ceil(queue.length*50/60);  // most clips are under a minute; each plays to its end
+    const speed=Number($('#autoSpeed').value)||1;
+    const minutes=Math.ceil(queue.length*(5+45/speed)/60);  // most clips are under a minute; each plays to its end
     const short=state.records.filter(r=>!C.playerUrl(r)).length;
     $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
       (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
@@ -614,15 +677,29 @@
     if(!auto)return;
     const ran=Date.now()-auto.startedAt-auto.pausedMs-(auto.pausedSince?Date.now()-auto.pausedSince:0),done=auto.finished;
     const left=done?Math.round(ran/done*(auto.queue.length-done)):0;
-    $('#autoTime').textContent=`Running ${clock(ran)}${auto.pausedSince?' · paused':''}${done&&left?' · about '+clock(left)+' left':''}`;
+    $('#autoTime').textContent=`Running ${clock(ran)}${auto.pausedSince?' · paused':''}${done&&left?' · about '+clock(left)+' left':''}${autoUse()}`;
+  }
+  // What the run used of Cloudflare's free daily AI allowance (10,000 "neurons"), when the Worker could tell.
+  const ALLOWANCE=10000;
+  function autoUse(end){
+    if(!auto||auto.usePartial||!auto.neurons||!auto.useClips)return '';
+    const each=auto.neurons/auto.useClips,n=x=>Math.round(x).toLocaleString();
+    return end?` · AI: about ${n(auto.neurons)} neurons, ${n(each)} a clip (the free ${n(ALLOWANCE)} a day fits about ${n(ALLOWANCE/each)} clips)`
+      :` · AI: about ${n(auto.neurons)} of the free ${n(ALLOWANCE)} a day`;
+  }
+  // When Cloudflare's free AI allowance comes back (midnight UTC), in the person's own time.
+  function allowanceMessage(){
+    const at=C.allowanceResets(),time=at.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+    return `Cloudflare's free AI allowance for today is used up. It starts again ${at.toDateString()===new Date().toDateString()?'today':'tomorrow'} at ${time} (midnight UTC); press Start again then, and it carries on with the clips not done yet.`;
   }
   // What one clip gave: how many words were heard, how many screenshots or slides were read, and how long it took.
   function autoFacts(res,meta){
     if(!meta||res.status==='unavailable')return '';
     const words=(res.transcript||'').split(/\s+/).filter(Boolean).length;
+    const read=typeof res.read==='number'&&res.read<meta.shots&&!meta.slides?`${res.read} of `:'';
     return [words?`${words} word${words===1?'':'s'} heard`:'no speech heard',
-      meta.slides?`${meta.slides} slide${meta.slides===1?'':'s'}`:meta.shots?`${meta.shots} screenshot${meta.shots===1?'':'s'}`:'',
-      clock(meta.ms)].filter(Boolean).join(' · ');
+      meta.slides?`${meta.slides} slide${meta.slides===1?'':'s'}`:meta.shots?`${read}${meta.shots} screenshot${meta.shots===1?'':'s'}${read?' read':''}`:'',
+      clock(meta.ms),C.speedLabel(meta.rate),meta.tries>1?'played on the second try':''].filter(Boolean).join(' · ');
   }
   function autoListItem(r,res,meta){
     const li=document.createElement('li');
@@ -662,7 +739,9 @@
       $('#autoError').textContent='The tab\'s sound was not shared. Press Start again and turn on "Also share tab audio".';return;
     }
     auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,mark:mode==='details'&&$('#autoMark').checked,mode,
-      chunks:[],recording:false,startedAt:Date.now(),pausedMs:0,pausedSince:0,finished:0};
+      chunks:[],recording:false,startedAt:Date.now(),pausedMs:0,pausedSince:0,finished:0,
+      speed:Number($('#autoSpeed').value)||1,neurons:0,useClips:0,usePartial:false,speedWarned:false};
+    try{localStorage.setItem('ClipAtlasAutoSpeed',String(auto.speed));}catch(_){/* remembered only when the browser allows */}
     auto.clock=setInterval(autoTime,1000);autoTime();
     $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
     $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
@@ -690,6 +769,9 @@
         state.records[i]=next;
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
         auto.finished++;
+        if(res.use){auto.neurons+=res.use.neurons;auto.useClips++;if(res.use.partial)auto.usePartial=true;}
+        if(meta&&C.speedMissing(auto.speed,meta.rate)&&!auto.speedWarned){auto.speedWarned=true;
+          $('#autoHint').textContent='Clips are playing at normal speed: the ClipAtlas playback speed extension does not seem to be on (see the README, "Playback speed").';}
         autoListItem(state.records[i],res,meta);
         commit();await persist();
         if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';auto.stop=true;return false;}
@@ -719,7 +801,8 @@
         autoCounts();
         const clipStarted=Date.now(),pausedBefore=auto.pausedMs;
         const got=await autoPlayClip(r);
-        const meta={ms:Date.now()-clipStarted-(auto.pausedMs-pausedBefore),shots:got.played?got.played.shots.length:0,slides:got.played?got.played.slides:0};
+        const meta={ms:Date.now()-clipStarted-(auto.pausedMs-pausedBefore),shots:got.played?got.played.shots.length:0,slides:got.played?got.played.slides:0,
+          rate:got.played?got.played.rate:0,tries:got.played?got.played.tries:0};
         if(got.done&&(got.done.reason==='SHARING_STOPPED'||got.done.reason==='STOPPED'))break;  // nothing saved for a clip cut short
         later(r,got.done?Promise.resolve(got.done):autoAnalyze(r,got),meta);
       }
@@ -729,11 +812,12 @@
     finally{
       clearInterval(auto.clock);autoTime();
       const took=Date.now()-auto.startedAt-auto.pausedMs;
-      $('#autoTime').textContent=`Took ${clock(took)}${auto.finished?' · '+clock(took/auto.finished)+' a clip on average':''}`;
-      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed;
+      $('#autoTime').textContent=`Took ${clock(took)}${auto.finished?' · '+clock(took/auto.finished)+' a clip on average':''}${autoUse(true)}`;
+      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed,warned=auto.speedWarned;
       autoCounts();
       autoCleanup();
-      $('#autoStart').hidden=false;$('#autoStop').hidden=true;$('#autoHint').textContent='';
+      $('#autoStart').hidden=false;$('#autoStop').hidden=true;
+      if(!warned)$('#autoHint').textContent='';
       if(done)$('#autoBar').style.width='100%';
       autoSay((stopReason||(done?'Done.':ended?'Tab sharing stopped, so auto-review stopped.':'Stopped.'))+` ${t.understood||0} filled in, ${t.transcribed?t.transcribed+' transcribed, ':''}${t.empty||0} nothing heard or seen, ${t.unavailable||0} would not play, ${t.failed||0} failed.`+(t.understood?' Filter Discoveries by "Auto-reviewed" to check them.':'')+(t.transcribed?' Transcripts show in Review clips and are searchable.':'')+(trimmed?' Your library is nearly full, so the last transcripts were kept short.':''));
       $('#autoStart').textContent='Start again';
@@ -757,6 +841,14 @@
     const w=360,h=640,c=document.createElement('canvas');c.width=w;c.height=h;
     c.getContext('2d').drawImage(v,box.left*sx,box.top*sy,box.width*sx,box.height*sy,0,0,w,h);
     return c;
+  }
+  // A small grayscale picture of one screenshot (72×128), to spot one that repeats the one before.
+  function autoShotSig(shot){
+    const c=document.createElement('canvas');c.width=72;c.height=128;
+    const g=c.getContext('2d',{willReadFrequently:true});g.drawImage(shot,0,0,72,128);
+    const d=g.getImageData(0,0,72,128).data,out=new Uint8Array(72*128);
+    for(let i=0;i<out.length;i++)out[i]=(d[i*4]*3+d[i*4+1]*6+d[i*4+2])/10;
+    return out;
   }
   // Sheets of up to three screenshots side by side, at most six sheets (eighteen
   // screenshots; a longer slideshow is sampled evenly, first and last kept).
@@ -815,7 +907,7 @@
       data=await res.json().catch(()=>({}));}
     catch(_){return {status:'failed',reason:'NETWORK'};}
     if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
-    if(res.status===429)return {stopRun:true,message:data.error||"Today's auto-review allowance is used up. Continue tomorrow."};
+    if(res.status===429)return {stopRun:true,message:data.reason==='AI_DAILY_LIMIT'||!data.error?allowanceMessage():data.error};
     if(res.status===503)return {stopRun:true,message:'Auto-review is not set up on the server yet (it needs the AI binding; see the README).'};
     if(!data.status)return {status:'failed',reason:'SERVER_'+res.status};
     return data;
@@ -866,12 +958,15 @@
   function autoPlay(r){
     return new Promise(resolve=>{
       const box=$('#autoFrame'),frame=document.createElement('iframe');
-      frame.src=C.playerUrl(r,{auto:true});frame.title='TikTok video player';
+      frame.src=C.playerUrl(r,{auto:true,speed:auto.speed});frame.title='TikTok video player';
       frame.allow='autoplay; encrypted-media; fullscreen';frame.referrerPolicy='strict-origin-when-cross-origin';
       box.replaceChildren(frame);
       let lastError=null;
       let started=Date.now(),ready=0,lastTick=0,length=MAX_VIDEO,times=null,shots=[],timeEvents=false,unmutes=0,triedPlay=false,finished=false,now=0;
       let listening=false,paused=false,pausedAt=0;
+      // The speed it really plays at: the player's clock against the wall clock (the speed extension may change it).
+      let prevT=null,prevAt=0,vidSum=0,wallSum=0;
+      const rate=()=>wallSum>=1.5?vidSum/wallSum:0;
       // A slideshow (photo post): walk every slide with the player's navigateTo,
       // wait until each one has finished loading, and screenshot it.
       let slides=false,want=-1,askedAt=0,probed=false,waitingSlide=false,lastSig=null;
@@ -897,7 +992,7 @@
           paused=true;pausedAt=Date.now();auto.pausedSince=pausedAt;if(!slides)send('pause');record(false);
           autoSay('Paused: this tab is hidden. Come back to it to continue.');
         }else if(!document.hidden&&paused){
-          paused=false;const gap=Date.now()-pausedAt;auto.pausedMs+=gap;auto.pausedSince=0;started+=gap;if(ready)ready+=gap;askedAt+=gap;lastTick=Date.now();
+          paused=false;const gap=Date.now()-pausedAt;auto.pausedMs+=gap;auto.pausedSince=0;started+=gap;if(ready)ready+=gap;askedAt+=gap;lastTick=Date.now();prevT=null;
           if(!slides)send('play');if(listening)record(true);
           autoSay('Continuing…');
         }
@@ -910,7 +1005,7 @@
         // Take the player away at once, so its end card does not stay up while the next clip loads.
         const note=document.createElement('p');note.className='player-none';note.textContent='Next clip…';
         frame.remove();box.replaceChildren(note);
-        resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError});
+        resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError,rate:slides?0:rate()});
       };
       auto.finishClip=finish;
       const startListening=()=>{if(listening)return;listening=true;auto.chunks=[];if(!paused)record(true);};
@@ -926,12 +1021,15 @@
         else if(d.type==='onStateChange'&&Number(d.value)===0&&!slides)finish('ENDED');
         else if(d.type==='onCurrentTime'){
           const t=Number(v.currentTime),dur=Number(v.duration);if(!isFinite(t))return;
-          timeEvents=true;lastTick=Date.now();now=t;startListening();
+          const at=Date.now();
+          if(!paused&&prevT!==null&&t>prevT&&t-prevT<3&&at-prevAt<3000){vidSum+=t-prevT;wallSum+=(at-prevAt)/1000;}
+          prevT=t;prevAt=at;
+          timeEvents=true;lastTick=at;now=t;startListening();
           if(slides)return;  // a slideshow's music: the slides decide when it is done
           if(!times&&dur>0){length=Math.min(dur,MAX_VIDEO);times=C.shotTimes(length);}
           // Not in the first 1.5 seconds: the shared tab can still show the clip before.
           while(times&&times.length&&t>=times[0]&&Date.now()-ready>=1500){times.shift();shoot();}
-          if(!paused)autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s`);
+          if(!paused){const fast=C.speedLabel(rate());autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s${fast?' · '+fast:''}`);}
           if(t>=length-0.5)finish('ENDED');
         }
         else if(d.type==='onPlayerError'||d.type==='onError'){
@@ -970,36 +1068,57 @@
   }
   // Play one clip, then take its sound (in pieces) and its screenshot sheets
   // straight away, since the next clip reuses the recorder.
+  // A player that errors, never loads or stops early is often a passing hiccup:
+  // such a clip is played once more before it counts as "would not play".
+  // A removed or private one (NOT_FOUND) is not tried again.
+  const AUTO_RETRY=['NO_PLAYER','PLAYBACK','STALLED'];
   async function autoPlayClip(r){
-    const played=await autoPlay(r);
+    let played=await autoPlay(r),tries=1;
+    if(AUTO_RETRY.includes(played.reason)&&!auto.stop){
+      autoSay(`It would not play${played.error?' (player error '+played.error+')':''}. Trying once more…`);
+      await new Promise(res=>setTimeout(res,1500));
+      if(!auto.stop){auto.chunks=[];played=await autoPlay(r);tries=2;}
+    }
+    played.tries=tries;
     if(played.reason==='SHARING_STOPPED')return {done:{reason:'SHARING_STOPPED'}};
+    if(auto.stop&&AUTO_RETRY.includes(played.reason))return {done:{reason:'STOPPED'}};
     if(played.reason==='STOPPED_BY_PERSON'||played.reason==='STOPPED_BY_RUN')return {done:{reason:'STOPPED'}};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
-      return {done:{status:'unavailable',reason:played.reason,detail:played.error?`player error ${played.error}`:''}};
-    return {played,parts:autoAudio(),images:auto.mode==='transcript'?[]:autoSheets(played.shots)};
+      return {done:{status:'unavailable',reason:played.reason,detail:[played.error&&`player error ${played.error}`,tries>1&&'tried twice'].filter(Boolean).join(', ')}};
+    return {played,parts:autoAudio(),shots:auto.mode==='transcript'?[]:played.shots};
   }
   // The AI part of one clip. It runs while the next clip plays.
-  async function autoAnalyze(r,{played,parts,images}){
+  async function autoAnalyze(r,{played,parts,shots}){
+    // How much of Cloudflare's daily AI allowance this clip used, as the Worker reports it.
+    const use={neurons:0,partial:false};
+    const count=d=>{if(typeof d.neurons==='number')use.neurons+=d.neurons;else use.partial=true;};
     // 1. What was said: each piece of sound through the speech-to-text model.
     const words=[];let listenFailed=false,listenDetail='';
     for(const part of parts){
       const heard=await autoPost('transcribe',{audio:part});
       if(heard.stopRun)return heard;
+      if(heard.status!=='failed')count(heard);
       if(heard.status==='transcribed')words.push(heard.text);else if(heard.status==='failed'){listenFailed=true;listenDetail=heard.detail||heard.reason;}
     }
     const transcript=words.join(' ').trim().slice(0,4000);
     if(auto.mode==='transcript'){
-      if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript};
-      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_SAID'};
+      if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript,use};
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use}:{status:'empty',reason:'NOTHING_SAID',use};
     }
-    // 2. What it is about: the transcript and the screenshots.
-    const trace={clip:r.id,ended:played.reason,slides:played.slides,screenshots:played.shots.length,soundParts:parts.length,heardWords:transcript.length,listenDetail};
+    // 2. Which screenshots to read: every slide; for a video, no repeats, and fewer when plenty was said.
+    const wordCount=transcript.split(/\s+/).filter(Boolean).length;
+    const picked=C.pickShots(shots.map(autoShotSig),{slides:played.slides>0,words:wordCount}).map(i=>shots[i]);
+    const images=autoSheets(picked);
+    // 3. What it is about: the transcript and the screenshots.
+    const trace={clip:r.id,ended:played.reason,tries:played.tries,slides:played.slides,screenshots:shots.length,read:picked.length,sheets:images.length,
+      speed:played.rate?Math.round(played.rate*100)/100:0,soundParts:parts.length,heardWords:wordCount,listenDetail};
     if(!transcript&&!images.length){console.info('ClipAtlas auto-review',trace);
-      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_TO_READ'};}
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use}:{status:'empty',reason:'NOTHING_TO_READ',use};}
     const data=await autoPost('understand',{transcript,images,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
-    console.info('ClipAtlas auto-review',{...trace,result:data.status,reason:data.reason,detail:data.detail});
+    if(!data.stopRun)count(data);
+    console.info('ClipAtlas auto-review',{...trace,result:data.status,reason:data.reason,detail:data.detail,neurons:use.partial?'unknown':Math.round(use.neurons)});
     if(data.stopRun)return data;
-    return {...data,transcript,detail:[data.detail,listenFailed&&listenDetail].filter(Boolean).join('; ')};
+    return {...data,transcript,read:picked.length,use,detail:[data.detail,listenFailed&&listenDetail].filter(Boolean).join('; ')};
   }
   function stopAuto(){if(auto){auto.stop=true;autoSay('Stopping…');auto.finishClip?.('STOPPED_BY_PERSON');}}
   function initAuto(){
@@ -1009,6 +1128,8 @@
     $('#autoStart').addEventListener('click',startAuto);
     $('#autoStop').addEventListener('click',stopAuto);
     $('#autoScope').addEventListener('change',autoEstimate);
+    try{const kept=localStorage.getItem('ClipAtlasAutoSpeed');if(kept&&[...$('#autoSpeed').options].some(o=>o.value===kept))$('#autoSpeed').value=kept;}catch(_){/* default speed */}
+    $('#autoSpeed').addEventListener('change',autoEstimate);
     $('#autoMode').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     $('#autoRedo').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     const close=()=>{if(auto&&!confirm('Stop auto-review and close?'))return;stopAuto();if(!auto)dlg.close();else{const wait=setInterval(()=>{if(!auto){clearInterval(wait);dlg.close();}},200);}};
@@ -1110,6 +1231,11 @@
         if(!r||!confirm('Delete this discovery? It will also leave the itinerary.'))return;
         state.records=state.records.filter(x=>x.id!==id);state.plan=state.plan.filter(x=>x.recordId!==id);commit();toast('Discovery deleted');
       } else if(kind==='remove-plan'){state.plan=state.plan.filter(p=>p.id!==id);commit();}
+      else if(kind==='day-city-remove'){const day=Number(action.dataset.day),next={...(state.dayCities||{})};
+        next[day]=dayCitiesOf(day).filter(c=>c!==action.dataset.city);state.dayCities=C.cleanDayCities(next,state.dayCount);commit();}
+      else if(kind==='show-city')showCity(action.dataset.city);
+      else if(kind==='jump-city'){const panel=[...$$('#itineraryCities .city-panel')].find(p=>p.dataset.cityKey===action.dataset.city.toLowerCase());if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}}
+      else if(kind==='itinerary-view'){itineraryView=action.dataset.itineraryView;renderItinerary();}
       else if(kind==='up')movePlan(id,-1);else if(kind==='down')movePlan(id,1);
     });
     for(const id of ['addButton','emptyAdd'])$("#"+id).addEventListener('click',()=>openEditor());
@@ -1130,9 +1256,23 @@
     for(const [value,label] of Object.entries(C.ANALYSIS_LABELS))$('#analysisFilter').insertAdjacentHTML('beforeend',`<option value="${html(value)}">${html(label)}</option>`);
     $('#tripTitle').addEventListener('change',evt=>{state.tripTitle=evt.target.value.trim().slice(0,140);commit();});
     $('#dayCount').addEventListener('change',evt=>{
-      const next=Number(evt.target.value);
-      if(state.plan.some(x=>x.day>next)&&!confirm('Stops assigned to later days will be moved to the last visible day. Continue?')){evt.target.value=String(state.dayCount);return;}
-      state.plan.forEach(x=>x.day=Math.min(x.day,next));state.dayCount=next;commit();
+      const next=C.cleanDayCount(evt.target.value);
+      if(!evt.target.value.trim()||next===state.dayCount){evt.target.value=String(state.dayCount);return;}
+      const later=state.plan.some(x=>x.day>next),cities=Object.keys(state.dayCities||{}).some(d=>Number(d)>next);
+      if((later||cities)&&!confirm(`Going down to ${next} day${next===1?'':'s'}: ${later?'stops on later days move to day '+next:''}${later&&cities?', and ':''}${cities?'the cities set for later days are cleared':''}. Continue?`)){evt.target.value=String(state.dayCount);return;}
+      state.plan.forEach(x=>x.day=Math.min(x.day,next));state.dayCount=next;state.dayCities=C.cleanDayCities(state.dayCities,next);commit();
+    });
+    // A city for a day: picked from the list, or typed and Enter.
+    $('#itineraryDays').addEventListener('input',evt=>{
+      const t=evt.target;if(!t.dataset.dayCity||(evt.inputType&&evt.inputType!=='insertReplacementText'))return;
+      if([...$('#cityOptions').options].some(o=>o.value===t.value))addDayCity(Number(t.dataset.dayCity),t.value);
+    });
+    $('#itineraryDays').addEventListener('keydown',evt=>{
+      const t=evt.target;if(!t.dataset.dayCity||evt.key!=='Enter')return;
+      evt.preventDefault();if(!addDayCity(Number(t.dataset.dayCity),t.value))t.value='';
+    });
+    $('#itineraryCities').addEventListener('change',evt=>{
+      if(evt.target.dataset.cityPlan)planOnDay(evt.target.dataset.cityPlan,Number(evt.target.value));
     });
     $('#itineraryDays').addEventListener('change',evt=>{
       if(evt.target.dataset.planDay){const p=state.plan.find(p=>p.id===evt.target.dataset.planDay);if(p){p.day=Number(evt.target.value);commit();}}
@@ -1146,7 +1286,7 @@
     const exportCSV=()=>download('clipatlas-library.csv',C.recordsToCSV(state.records),'text/csv;charset=utf-8');
     $('#exportCsv').addEventListener('click',exportCSV);$('#exportCsvImport').addEventListener('click',exportCSV);
     $('#downloadTemplate').addEventListener('click',()=>download('clipatlas-import-template.csv',C.csvTemplate(),'text/csv;charset=utf-8'));
-    $('#exportPlan').addEventListener('click',()=>download('clipatlas-itinerary.md',C.planMarkdown(state.plan,state.records,state.tripTitle),'text/markdown;charset=utf-8'));
+    $('#exportPlan').addEventListener('click',()=>download('clipatlas-itinerary.md',C.planMarkdown(state.plan,state.records,state.tripTitle,state.dayCities),'text/markdown;charset=utf-8'));
     $('#fileImport').addEventListener('change',e=>importFile(e.target.files?.[0]));
     const drop=$('#dropZone');
     for(const name of ['dragover','dragenter'])drop.addEventListener(name,e=>{e.preventDefault();drop.classList.add('dragging');});
@@ -1164,6 +1304,7 @@
     state = saved && Array.isArray(saved.records) ? {...emptyState(),...saved} : emptyState();
     if(!Array.isArray(state.plan))state.plan=[];
     if(!Array.isArray(state.collections))state.collections=[];
+    state.dayCount=C.cleanDayCount(state.dayCount);state.dayCities=C.cleanDayCities(state.dayCities,state.dayCount);
     const setup=C.ensureSetup(state);state=setup.state;return setup;
   }
   function authUI() {

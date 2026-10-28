@@ -60,6 +60,35 @@ test('itinerary export includes original source and notes',()=>{
  const r=C.createRecord({url:long,title:'Visit place',notes:'verify hours'});
  const p=C.planMarkdown([{id:'p',recordId:r.id,day:2,note:'Lunch'}],[r],'Taiwan trip');
  assert.match(p,/## Day 2/);assert.match(p,/Visit place/);assert.match(p,/Lunch/);assert.match(p,/not been independently verified/);
+ const q=C.planMarkdown([{id:'p',recordId:r.id,day:20,note:''}],[r],'Taiwan trip',{1:['Taipei','Jiufen'],20:['Tainan']});
+ assert.match(q,/## Day 1 · Taipei, Jiufen\n\n_No stops yet._/,'a day with cities but no stops yet is listed');
+ assert.match(q,/## Day 20 · Tainan\n\n1\. \*\*Visit place/,'days past 14 are kept');
+});
+test('itinerary days: 1 to 30, each with its cities; a clip goes to the day set to its city',()=>{
+ assert.deepEqual([C.cleanDayCount(3),C.cleanDayCount('12'),C.cleanDayCount(45),C.cleanDayCount(0),C.cleanDayCount('x'),C.cleanDayCount(2.6)],[3,12,30,7,7,3]);
+ assert.deepEqual(C.cleanDayCities({1:[' Taipei ','taipei','Jiufen'],2:'Tainan',3:['','x'.repeat(80)],9:['Hualien']},5),
+  {1:['Taipei','Jiufen'],3:['x'.repeat(60)]},'trimmed, each once, days past the trip and broken entries dropped');
+ assert.deepEqual(C.cleanDayCities({1:['a','b','c','d','e','f','g']},3)[1].length,6,'at most six a day');
+ assert.deepEqual(C.cleanDayCities(null,3),{});
+ const days={1:['Taipei'],2:['Tainan'],3:['Taipei','Jiufen']};
+ assert.equal(C.dayForClip({city:'Tainan'},days,3),2);
+ assert.equal(C.dayForClip({city:' jiufen'},days,3),3,'any of the day\'s cities, whatever the case');
+ assert.equal(C.dayForClip({city:'Taipei'},days,3),1,'the first such day');
+ assert.equal(C.dayForClip({city:'Kaohsiung'},days,3),1); assert.equal(C.dayForClip({city:''},days,3),1);
+ assert.equal(C.dayForClip({city:'Jiufen'},days,2),1,'only days that are in the trip');
+});
+test('by city: every clip sorted into its city, then its category, separate from the days',()=>{
+ const rec=(id,city,category,country='Taiwan')=>({id,city,category,country,title:id});
+ const records=[rec('a','Taipei','Taiwan · Food'),rec('b','Tainan','Taiwan · Food'),rec('c','taipei ','Taiwan · Shopping'),
+  rec('d','Taipei','Unsorted'),rec('e','','Travel tips',''),rec('f','Taipei','Taiwan · Activities'),rec('g','Tainan','Brand new')];
+ const cats=[{name:'Taiwan · Food'},{name:'Taiwan · Shopping'},{name:'Taiwan · Activities'},{name:'Travel tips'}];
+ assert.deepEqual(C.cityList(records),[{name:'Taipei',country:'Taiwan',count:4},{name:'Tainan',country:'Taiwan',count:2}]);
+ const board=C.cityBoard(records,cats,[{recordId:'a',day:2},{recordId:'e',day:1}]);
+ assert.deepEqual(board.map(c=>[c.name,c.count,c.planned]),[['Taipei',4,1],['Tainan',2,0],['',1,1]],'most clips first; no city last');
+ assert.deepEqual(board[0].groups.map(g=>[g.category,g.items.map(i=>i.record.id+(i.day?'@'+i.day:''))]),
+  [['Taiwan · Food',['a@2']],['Taiwan · Shopping',['c']],['Taiwan · Activities',['f']],['Unsorted',['d']]],'the person\'s category order, Unsorted last');
+ assert.deepEqual(board[1].groups.map(g=>g.category),['Taiwan · Food','Brand new'],'a category not in the list comes after the listed ones');
+ assert.deepEqual(C.cityBoard([],cats,[]),[]);
 });
 const ID='7662085125500407061';
 const ZW=String.fromCharCode(0x200b),NBSP=String.fromCharCode(0xa0);
@@ -219,6 +248,35 @@ test('auto-review queue: playable clips not tried yet; failed ones again; redo t
  assert.deepEqual(C.autoQueue(rec,'review',{redo:true}),['a','c','d']);
  assert.match(C.playerUrl(rec[0],{auto:true}),/controls=0/);
  assert.doesNotMatch(C.playerUrl(rec[0]),/controls=0/);
+});
+test('playback speed: asked for after the #, only in auto-review; measured speed shown and checked',()=>{
+ const r={videoId:'7000000000000000001'};
+ assert.match(C.playerUrl(r,{auto:true,speed:1.5}),/&closed_caption=0#clipatlas-speed=1\.5$/);
+ assert.match(C.playerUrl(r,{auto:true,speed:5}),/#clipatlas-speed=2$/,'at most 2x');
+ assert.doesNotMatch(C.playerUrl(r,{auto:true,speed:1}),/#/);
+ assert.doesNotMatch(C.playerUrl(r,{speed:1.5}),/#/,'Review mode plays at normal speed');
+ assert.deepEqual([1,1.1,1.49,1.52,2,2.4,10,0].map(C.speedLabel),['','','1.5×','1.5×','2×','2.5×','','']);
+ assert.equal(C.speedMissing(1.5,1.01),true,'asked for 1.5x, playing at 1x: the extension is not on');
+ assert.equal(C.speedMissing(1.5,1.49),false); assert.equal(C.speedMissing(1,1),false); assert.equal(C.speedMissing(1.5,0),false,'not measured');
+});
+test('the free AI allowance starts again at midnight UTC',()=>{
+ assert.equal(C.allowanceResets(new Date('2026-10-28T15:30:00Z')).toISOString(),'2026-10-29T00:00:00.000Z');
+ assert.equal(C.allowanceResets(new Date('2026-10-28T23:59:59Z')).toISOString(),'2026-10-29T00:00:00.000Z');
+ assert.equal(C.allowanceResets(new Date('2026-12-31T00:00:00Z')).toISOString(),'2027-01-01T00:00:00.000Z');
+});
+test('screenshots read: every slide; a video without repeats, fewer when plenty was said',()=>{
+ const pic=k=>Uint8Array.from({length:1000},(_,i)=>(i*7+k*131)%256);
+ const still=pic(1),nearly=Uint8Array.from(still,(v,i)=>i<1?255-v:v);   // one pixel of a thousand differs
+ const caption=Uint8Array.from(still,(v,i)=>i<5?255-v:v);               // five differ: a few letters changed
+ assert.deepEqual(C.pickShots([still,nearly,still,caption,caption]),[0,3],'repeats dropped; a changed caption kept');
+ const many=Array.from({length:17},(_,k)=>pic(k+2));
+ assert.equal(C.pickShots(many).length,12,'at most 12 when little was said');
+ assert.deepEqual(C.pickShots(many,{words:30}),[0,3,6,10,13,16],'at most 6, spread across it, when plenty was said');
+ assert.deepEqual(C.pickShots(many,{words:29}).length,12);
+ const slides=Array.from({length:4},()=>still);
+ assert.deepEqual(C.pickShots(slides,{slides:true,words:200}),[0,1,2,3],'every slide, even ones that look alike');
+ assert.equal(C.pickShots(Array.from({length:30},(_,k)=>pic(k)),{slides:true}).length,18);
+ assert.deepEqual(C.pickShots([]),[]);
 });
 test('auto-review fills only what is empty, sorts Unsorted clips, keeps what was heard and seen',()=>{
  const old=C.createRecord({id:'k',url:'https://www.tiktokv.com/share/video/7662085125500407061/',title:'',notes:'my note',

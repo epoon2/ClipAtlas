@@ -416,12 +416,48 @@
   /* ---- Review mode ------------------------------------------------------------
      TikTok's official embedded player plays a video by its ID in the viewer's
      own browser: no lookup, no rate limit. */
-  function playerUrl(r, { auto = false } = {}) {
+  function playerUrl(r, { auto = false, speed = 1 } = {}) {
     const id = r && safeString(r.videoId);
     if (!/^\d{8,25}$/.test(id)) return '';
     // Auto-review hides the controls so they do not cover the text on the video.
+    // A faster speed is asked for after the # (TikTok never sees it); only the
+    // ClipAtlas playback speed extension reads it.
+    const fast = auto && Number(speed) > 1 ? `#clipatlas-speed=${Math.min(2, Number(speed))}` : '';
     return `https://www.tiktok.com/player/v1/${id}?description=1&music_info=1&autoplay=1&rel=0` +
-      (auto ? '&controls=0&closed_caption=0' : '');
+      (auto ? '&controls=0&closed_caption=0' : '') + fast;
+  }
+  /** "1.5×" for a measured playback speed that is clearly faster than normal (up to 2.5×), else "". */
+  function speedLabel(rate) {
+    if (!(rate >= 1.15 && rate <= 2.5)) return '';
+    return `${Math.round(rate * 4) / 4}×`;
+  }
+  /** True when a faster speed was asked for but clips play at normal speed (the extension is not on). */
+  function speedMissing(wanted, rate) {
+    return Number(wanted) > 1.05 && rate > 0.5 && rate < 1.1;
+  }
+  /** When Cloudflare's free daily AI allowance starts again: the next 00:00 UTC. */
+  function allowanceResets(now = new Date()) {
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  }
+  /** Which screenshots of a clip go to the vision model (indexes, in order). Each
+      sheet of three costs about as much as one more clip's speech-to-text, so:
+      a slideshow keeps every slide (at most 18, sampled evenly); a video drops
+      screenshots that look the same as the one before (a still picture), then
+      keeps at most 6 when plenty was said (30 words or more: the words carry it)
+      and at most 12 when not. ``sigs`` are small grayscale pictures (sigChange). */
+  function pickShots(sigs, { slides = false, words = 0 } = {}) {
+    let keep = (sigs || []).map((_, i) => i);
+    if (!slides) {
+      const distinct = [];
+      for (const i of keep) {
+        const last = distinct[distinct.length - 1];
+        if (last === undefined || !sigs[i] || !sigs[last] || sigChange(sigs[i], sigs[last]) >= 0.002) distinct.push(i);
+      }
+      keep = distinct;
+    }
+    const most = slides ? 18 : words >= 30 ? 6 : 12;
+    if (keep.length <= most) return keep;
+    return Array.from({ length: most }, (_, i) => keep[Math.round(i * (keep.length - 1) / (most - 1))]);
   }
 
   /* ---- Auto-review ------------------------------------------------------------
@@ -595,17 +631,93 @@
     }) };
   }
 
-  function planMarkdown(items, records, title) {
+  /* ---- Itinerary: days with their cities, and saved clips sorted by city ---- */
+  const MAX_DAYS = 30;
+  const cityName = v => safeString(v).replace(/\s+/g, ' ').slice(0, 60);
+  const cityKey = v => cityName(v).toLowerCase();
+  /** How many days a trip can have: a whole number from 1 to 30 (7 when unreadable). */
+  function cleanDayCount(v) {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 1 ? Math.min(MAX_DAYS, n) : 7;
+  }
+  /** The cities of the saved clips, most clips first: [{name, country, count}].
+      "Taipei" and "taipei " are one city, shown the way it is written most. */
+  function cityList(records) {
+    const by = new Map();
+    for (const r of records || []) {
+      const k = cityKey(r && r.city); if (!k) continue;
+      if (!by.has(k)) by.set(k, { spellings: new Map(), countries: new Map(), count: 0 });
+      const c = by.get(k), name = cityName(r.city), country = safeString(r.country);
+      c.count++; c.spellings.set(name, (c.spellings.get(name) || 0) + 1);
+      if (country) c.countries.set(country, (c.countries.get(country) || 0) + 1);
+    }
+    const most = m => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
+    return [...by.values()].map(c => ({ name: most(c.spellings), country: most(c.countries), count: c.count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+  /** The cities picked for each day, {day: [city, …]}: days 1 to ``dayCount`` only, at most 6 a day, each once. */
+  function cleanDayCities(input, dayCount) {
+    const out = {};
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return out;
+    for (let day = 1; day <= cleanDayCount(dayCount); day++) {
+      const seen = new Set(), keep = [];
+      for (const c of Array.isArray(input[day]) ? input[day] : []) {
+        const name = cityName(c), k = name.toLowerCase();
+        if (name && !seen.has(k) && keep.length < 6) { seen.add(k); keep.push(name); }
+      }
+      if (keep.length) out[day] = keep;
+    }
+    return out;
+  }
+  /** Where a clip goes when it is added to the itinerary: the first day set to its city, else day 1. */
+  function dayForClip(record, dayCities, dayCount) {
+    const k = cityKey(record && record.city);
+    if (k) for (let day = 1; day <= cleanDayCount(dayCount); day++)
+      if (((dayCities || {})[day] || []).some(c => cityKey(c) === k)) return day;
+    return 1;
+  }
+  /** Saved clips sorted into cities, separate from the days: [{name, country,
+      count, planned, groups: [{category, items: [{record, day}]}]}]. Cities with
+      the most clips come first; inside a city the clips are grouped by category
+      in the person's own category order (Unsorted last), keeping the order of
+      ``records``; ``day`` is the day it is planned on, or 0. Clips with no city
+      yet come last, as a city named ''. */
+  function cityBoard(records, categories, plan) {
+    const dayOf = new Map((plan || []).map(p => [p.recordId, Number(p.day) || 1]));
+    const order = new Map((categories || []).map((c, i) => [c.name, i]));
+    const cities = cityList(records);
+    const byKey = new Map(cities.map(c => [cityKey(c.name), { ...c, planned: 0, groups: new Map() }]));
+    const unknown = { name: '', country: '', count: 0, planned: 0, groups: new Map() };
+    for (const r of records || []) {
+      const city = byKey.get(cityKey(r.city)) || unknown;
+      if (city === unknown) unknown.count++;
+      const category = safeString(r.category) || 'Unsorted', day = dayOf.get(r.id) || 0;
+      if (day) city.planned++;
+      if (!city.groups.has(category)) city.groups.set(category, []);
+      city.groups.get(category).push({ record: r, day });
+    }
+    const rank = name => name === 'Unsorted' ? Infinity : order.has(name) ? order.get(name) : 1e6;
+    const done = c => ({ ...c, groups: [...c.groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
+      .map(([category, items]) => ({ category, items })) });
+    const out = cities.map(c => done(byKey.get(cityKey(c.name))));
+    if (unknown.count) out.push(done(unknown));
+    return out;
+  }
+
+  function planMarkdown(items, records, title, dayCities = {}) {
     const byId = new Map(records.map(v => [v.id, v]));
     const groups = new Map();
+    for (const day of Object.keys(dayCities || {}).map(Number)) if (day >= 1 && day <= MAX_DAYS && (dayCities[day] || []).length) groups.set(day, []);
     for (const entry of items) { if (!byId.has(entry.recordId)) continue;
-      const key = Math.max(1, Math.min(14, Number(entry.day) || 1));
+      const key = Math.max(1, Math.min(MAX_DAYS, Number(entry.day) || 1));
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push({ ...entry, record: byId.get(entry.recordId) });
     }
     let out = '# ' + (safeString(title) || 'My saved TikTok itinerary') + '\n\n';
     for (const [day, entries] of [...groups.entries()].sort((a,b) => a[0]-b[0])) {
-      out += '## Day ' + day + '\n\n';
+      const where = ((dayCities || {})[day] || []).map(cityName).filter(Boolean);
+      out += '## Day ' + day + (where.length ? ' · ' + where.join(', ') : '') + '\n\n';
+      if (!entries.length) out += '_No stops yet._\n';
       for (const [i, entry] of entries.entries()) {
         const r = entry.record;
         out += `${i + 1}. **${r.title || r.place || 'Saved TikTok'}**`;
@@ -619,5 +731,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

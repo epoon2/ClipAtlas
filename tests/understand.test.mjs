@@ -101,8 +101,10 @@ test('look, then decide: what each sheet shows goes to the text model with the t
   const r = await understandClip(request({ images: [IMAGE, IMAGE] }), ai);
   assert.equal(r.status, 'understood');
   assert.deepEqual(ai.calls.map(c => c.model), [VISION, VISION, TEXT]);
-  assert.equal(ai.calls[0].input.image, IMAGE.slice('data:image/jpeg;base64,'.length), 'first way: the prompt and the bare base64');
-  assert.match(ai.calls[0].input.prompt, /SHOWS:/);
+  const parts = ai.calls[0].input.messages[0].content;
+  assert.deepEqual(parts.map(p => p.type), ['text', 'image_url'], 'first way: message parts, as llama-4-scout takes it');
+  assert.equal(parts[1].image_url.url, IMAGE);
+  assert.match(parts[0].text, /SHOWS:/);
   assert.equal(ai.calls[2].input.response_format.type, 'json_schema');
   const prompt = ai.calls[2].input.messages[0].content;
   assert.match(prompt, /best beef noodles in taipei/);
@@ -112,7 +114,7 @@ test('look, then decide: what each sheet shows goes to the text model with the t
   assert.equal(r.onScreen, 'BEST NOODLES 📍Taipei', 'the same caption on both sheets is kept once');
   const who = await understandClip(request(), fakeAI({ looked: LOOKED_WHO }));
   assert.equal(who.creator, '@noodle.fan', 'who posted it, when the player shows it');
-  assert.match(ai.calls[0].input.prompt, /Leave out the player's own buttons, the like, comment, share and save counts/);
+  assert.match(parts[0].text, /Leave out the player's own buttons, the like, comment, share and save counts/);
 });
 
 test('a vision model that refuses every way is followed by the next model and way, which are remembered', async () => {
@@ -145,11 +147,12 @@ test('a retired model is skipped after one try, for looking and for deciding', a
 
 test('a way that drops the picture without an error is not taken as working', async () => {
   const first = VISION_MODELS[0];
-  const ai = fakeAI({ fail: { [first]: input => ({ response: typeof input.prompt === 'string' && typeof input.image === 'string' && !input.image.startsWith('data:')
+  const ai = fakeAI({ fail: { [first]: input => ({ response: Array.isArray(input.messages?.[0]?.content)
     ? 'SHOWS: There are no screenshots provided.\nTEXT: NONE' : LOOKED }) } });
   const r = await understandClip(request(), ai);
   assert.equal(r.status, 'understood');
   assert.equal(r.shows, 'A bowl of beef noodle soup at a busy stall.');
+  assert.ok(ai.calls[1].input.prompt && ai.calls[1].input.image, 'the next way was tried');
 });
 
 test('when no vision model works, it says why, and does not try them all again for every clip', async () => {
@@ -209,11 +212,27 @@ test('failures say which step failed and what the service said', async () => {
   assert.equal(down.detail, 'listen: 5006: audio not valid');
 });
 
+test('each answer says how much of the free daily allowance it used, when every call reports it', async () => {
+  // A minute of 16 kHz 16-bit sound is 1,920,000 bytes of WAV data: 46.63 neurons.
+  const minute = Buffer.alloc(44 + 1_920_000).toString('base64');
+  assert.equal((await transcribeAudio(minute, fakeAI())).neurons, 46.6);
+  assert.equal((await transcribeAudio(minute, fakeAI({ said: '' }))).neurons, 46.6, 'silence is still listened to');
+  const counted = { run: async (model, input) => {
+    const reply = await fakeAI().run(model, input);
+    return { ...reply, usage: { prompt_tokens: 1000, completion_tokens: 200 } };
+  } };
+  // look: 1000 x 24,545 + 200 x 77,273 per million = 40.0; decide: 1000 x 26,668 + 200 x 204,805 per million = 67.6
+  const r = await understandClip(request({ images: [IMAGE, IMAGE] }), counted);
+  assert.equal(r.neurons, 40 * 2 + 67.6);
+  const unknown = await understandClip(request(), fakeAI());
+  assert.equal(unknown.neurons, undefined, 'no token counts: not guessed');
+});
+
 test('the setup check tries every step and reports each one', async () => {
   const ok = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI());
   assert.equal(ok.ok, true);
   assert.deepEqual(ok.steps.map(s => [s.step, s.ok]), [['listen', true], ['look', true], ['decide', true]]);
-  assert.match(ok.steps[1].said, /using llama-4-scout-17b-16e-instruct, prompt \+ base64/);
+  assert.match(ok.steps[1].said, /using llama-4-scout-17b-16e-instruct, message parts/);
   assert.match(ok.steps[2].said, /^using llama-3\.3-70b-instruct-fp8-fast: Food/);
   resetForTests();
   const bad = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI({ fail: { [WHISPER]: '5006: bad audio', ...Object.fromEntries(TEXT_MODELS.map(m => [m, 'model is busy'])) } }));

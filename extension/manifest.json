@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "ClipAtlas playback speed",
+  "version": "1.0.0",
+  "description": "Plays TikTok's embedded player faster during ClipAtlas auto-review. Does nothing anywhere else.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.tiktok.com/player/*"],
+      "js": ["speed.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    }
+  ]
+}

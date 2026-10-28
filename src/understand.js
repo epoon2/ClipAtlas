@@ -2,9 +2,10 @@
 //
 // The browser plays the clip in TikTok's official embedded player, records the
 // tab's own sound and takes screenshots of the player while it plays: about
-// one every 10 seconds of a video (played to its end), or one of every slide
+// one every 5 seconds of a video (played to its end), or one of every slide
 // of a slideshow once it has loaded (the person shares the ClipAtlas tab once
-// per run). Nothing is downloaded from TikTok.
+// per run). Of a video's screenshots, repeats are dropped and at most 6 are
+// sent when plenty was said (12 when not). Nothing is downloaded from TikTok.
 //
 //   /api/transcribe  one piece of the sound (a WAV of at most a minute) goes to
 //                    Whisper, an existing speech-to-text model; long clips are
@@ -17,6 +18,7 @@
 //                       seen into the clip's details, in JSON mode.
 //   /api/aicheck     tries each model once on a tiny test sound and picture, so
 //                    a setup problem shows its real error message.
+// Transcribe and understand say how many of the day's free "neurons" they used.
 //
 // Everything runs on Workers AI, on the account's own Cloudflare allowance.
 // Answers are checked before they are returned: the category must be one of
@@ -70,6 +72,41 @@ function failure(step, err) {
   return { reason: isLimit(err) ? 'AI_DAILY_LIMIT' : 'AI_FAILED', detail: clip(`${step}: ${text}`, LIMITS.detail) };
 }
 
+/* ---- how much of the daily allowance a call used ------------------------- */
+
+// Cloudflare's free allowance is 10,000 "neurons" a day (it starts again at
+// midnight UTC). Neurons per million input and output tokens, and per minute of
+// sound, from the Workers AI pricing page (October 2026). A call to a model not
+// listed here, or a reply without token counts, makes the total "partial".
+export const NEURONS = {
+  '@cf/meta/llama-4-scout-17b-16e-instruct': [24545, 77273],
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast': [26668, 204805],
+};
+export const WHISPER_NEURONS_PER_MINUTE = 46.63;
+
+/** Neurons for one text or vision reply from its token counts, or null when they are not known. */
+export function neuronsFor(model, reply) {
+  const rate = NEURONS[model], u = reply && reply.usage;
+  if (!rate || !u || !Number.isFinite(u.prompt_tokens) || !Number.isFinite(u.completion_tokens)) return null;
+  return (u.prompt_tokens * rate[0] + u.completion_tokens * rate[1]) / 1e6;
+}
+/** Neurons for one piece of sound: a 16 kHz, 16-bit mono WAV, from its size. */
+export function soundNeurons(audio) {
+  const seconds = Math.max(0, String(audio).length * 3 / 4 - 44) / 32000;
+  return seconds / 60 * WHISPER_NEURONS_PER_MINUTE;
+}
+/** env.AI with a running total of what its calls used. */
+function metered(ai) {
+  const m = { neurons: 0, partial: false, async run(model, input) {
+    const reply = await ai.run(model, input);
+    const n = neuronsFor(model, reply);
+    if (n === null) m.partial = true; else m.neurons += n;
+    return reply;
+  } };
+  return m;
+}
+const round = n => Math.round(n * 10) / 10;
+
 /* ---- listen: /api/transcribe ------------------------------------------- */
 
 /** {ok, audio} for a base64 WAV of one piece of a clip, or {ok:false}. */
@@ -85,9 +122,9 @@ export async function transcribeAudio(audio, ai) {
   let said;
   try { said = await ai.run(WHISPER, { audio, task: 'transcribe', vad_filter: true }); }
   catch (err) { const f = failure('listen', err); return { status: 'failed', ...f, message: MESSAGES[f.reason], text: '' }; }
-  const text = clip(said && said.text, LIMITS.piece);
-  if (!text || NOT_SPEECH.test(text)) return { status: 'empty', reason: 'NOTHING_SAID', message: MESSAGES.NOTHING_SAID, text: '' };
-  return { status: 'transcribed', reason: 'TRANSCRIBED', message: MESSAGES.TRANSCRIBED, text };
+  const text = clip(said && said.text, LIMITS.piece), neurons = round(soundNeurons(audio));
+  if (!text || NOT_SPEECH.test(text)) return { status: 'empty', reason: 'NOTHING_SAID', message: MESSAGES.NOTHING_SAID, text: '', neurons };
+  return { status: 'transcribed', reason: 'TRANSCRIBED', message: MESSAGES.TRANSCRIBED, text, neurons };
 }
 
 /* ---- look: the vision model, in plain words ----------------------------- */
@@ -97,9 +134,10 @@ export async function transcribeAudio(audio, ai) {
 // first pair that works for the rest of this Worker instance. A retired model
 // is skipped at once. If nothing works, say so for ten minutes instead of
 // trying every pair again for each clip.
+// "message parts" is the way llama-4-scout takes it (October 2026), so it goes first.
 const LOOK_WAYS = {
-  'prompt + base64': (p, url) => ({ prompt: p, image: url.slice(JPEG_PREFIX.length) }),
   'message parts': (p, url) => ({ messages: [{ role: 'user', content: [{ type: 'text', text: p }, { type: 'image_url', image_url: { url } }] }] }),
+  'prompt + base64': (p, url) => ({ prompt: p, image: url.slice(JPEG_PREFIX.length) }),
   'messages + image': (p, url) => ({ messages: [{ role: 'user', content: p }], image: url }),
   'prompt + data URL': (p, url) => ({ prompt: p, image: url }),
 };
@@ -277,6 +315,12 @@ export async function decide(ai, prompt) {
  * place, city, country, tags, onScreen, shows}.
  */
 export async function understandClip(request, ai) {
+  const m = metered(ai);
+  const res = await understandWith(request, m);
+  // What it used of the daily allowance, when every call said (``neurons`` is left out otherwise).
+  return m.partial ? res : { ...res, neurons: round(m.neurons) };
+}
+async function understandWith(request, ai) {
   const out = { heard: !!request.transcript, seen: false };
   if (!out.heard && !request.images.length) return { ...out, status: 'empty', reason: 'NOTHING_TO_READ', message: MESSAGES.NOTHING_TO_READ };
   const shows = [], texts = [];
