@@ -46,28 +46,33 @@ const id = location.pathname.split('/').pop();
 const post = (type, value) => parent.postMessage({ type, value, 'x-tiktok-player': true }, '*');
 if (id.endsWith('4')) { post('onPlayerReady'); setTimeout(() => post('onPlayerError', { errorCode: 1001, errorType: 'INVALID_VIDEO' }), 300); }
 else if (id.endsWith('5')) {
-  // A slideshow of four slides, each its own color; it moves only when asked (navigateTo), as the documents describe.
+  // A slideshow of four slides, each its own color; it moves only when asked (navigateTo), as the documents
+  // describe. Each slide shows a flat gray "loading" picture first; slide 3 takes 2.5 seconds to load.
   const colors = ['rgb(30,60,220)', 'rgb(30,170,60)', 'rgb(240,150,20)', 'rgb(150,40,190)'];
+  let loading = null;
   const show = i => { document.body.style.background = colors[i]; document.querySelector('div').textContent = 'SLIDE ' + (i + 1); };
+  const load = i => { clearTimeout(loading); document.body.style.background = 'rgb(128,128,128)'; document.querySelector('div').textContent = '';
+    loading = setTimeout(() => show(i), i === 2 ? 2500 : 700); };
   show(0);
   addEventListener('message', e => {
     const d = e.data; if (!d || d['x-tiktok-player'] !== true || d.type !== 'navigateTo') return;
     const i = Number(d.value); if (!(i >= 0 && i < colors.length)) return;
-    show(i); post('onImageChange', i);
+    load(i); post('onImageChange', i);
   });
   post('onPlayerReady');
 }
 else {
-  let t = 0, timer = null, osc = null; const duration = 3;
+  // A 3-second video, and (id ...2) a 100-second one whose clock runs 10 times fast, to show it plays to the end.
+  let t = 0, timer = null, osc = null; const duration = id.endsWith('2') ? 100 : 3, speed = id.endsWith('2') ? 10 : 1;
   addEventListener('message', e => {
     const d = e.data; if (!d || d['x-tiktok-player'] !== true) return;
-    if (d.type === 'play' && !timer) {
+    if (d.type === 'play' && !timer && t < duration) {
       const ctx = new AudioContext(); osc = ctx.createOscillator(); osc.frequency.value = 330; osc.connect(ctx.destination); osc.start();
       post('onStateChange', 1);
-      timer = setInterval(() => { t += 0.25; post('onCurrentTime', { currentTime: t, duration });
-        if (t >= duration) { clearInterval(timer); osc.stop(); post('onStateChange', 0); } }, 250);
+      timer = setInterval(() => { t = Math.min(duration, t + 0.25 * speed); post('onCurrentTime', { currentTime: t, duration });
+        if (t >= duration) { clearInterval(timer); timer = null; osc.stop(); post('onStateChange', 0); } }, 250);
     }
-    if (d.type === 'pause') { clearInterval(timer); try { osc && osc.stop(); } catch (_) {} }
+    if (d.type === 'pause') { clearInterval(timer); timer = null; try { osc && osc.stop(); } catch (_) {} post('onStateChange', 2); }
   });
   post('onPlayerReady');
 }
@@ -83,6 +88,8 @@ const browser = await chromium.launch({ channel: 'chromium', headless: false,
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
+const traces = [];
+page.on('console', m => { if (/ClipAtlas auto-review/.test(m.text())) traces.push(m.text()); });
 await page.route('https://www.tiktok.com/**', route => route.fulfill({ contentType: 'text/html', body: PLAYER }));
 await page.addInitScript(() => { window.__csp = [];
   document.addEventListener('securitypolicyviolation', e => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI)); });
@@ -118,8 +125,20 @@ check('and shows the real error of a step that fails', /^✗ Listen.*listen: 500
 AI.broken = false;
 asked.length = 0;
 
-await page.selectOption('#autoCap', '30');
 await page.click('#autoStart');
+// Switching away pauses it; coming back carries on.
+const setHidden = hidden => page.evaluate(h => {
+  if (h) { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); }
+  else { delete document.hidden; delete document.visibilityState; }
+  document.dispatchEvent(new Event('visibilitychange'));
+}, hidden);
+await page.waitForFunction(() => /Watching and listening|Reading slide|Slide/.test(document.getElementById('autoNow').textContent), null, { timeout: 30000 });
+await setHidden(true);
+const pausedText = await page.textContent('#autoNow');
+await page.waitForTimeout(1500);
+check('switching away pauses it', /^Paused: this tab is hidden/.test(pausedText) && /^Paused/.test(await page.textContent('#autoNow')), pausedText);
+await setHidden(false);
 await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three)/.test(document.getElementById('autoNow').textContent), null, { timeout: 90000 });
 const summary = await page.textContent('#autoNow');
 check('the run finishes and says what happened', /^Done\. 3 filled in, 0 nothing heard or seen, 1 would not play, 0 failed\./.test(summary), summary);
@@ -141,9 +160,12 @@ const sheets = await page.evaluate(async urls => Promise.all(urls.map(url => new
   img.src = url; }))), seen.map(a => a.image));
 const red = ([r, g, b]) => r > 150 && g < 90 && b < 90;
 const videoSheets = sheets.filter(s => s.panels.every(red)), slideSheets = sheets.filter(s => !s.panels.some(red));
-check('video screenshots show the player itself', videoSheets.length === 2 && videoSheets.every(s => s.h === 640 && s.w >= 360), JSON.stringify(videoSheets));
-const slideColors = slideSheets.flatMap(s => s.panels.map(([r, g, b]) => r > 200 ? 'orange' : b > 150 && r < 90 ? 'blue' : g > 120 ? 'green' : 'purple'));
-check('every slide of the slideshow was screenshotted, in order, on two sheets', slideSheets.length === 2 &&
+check('video screenshots show the player itself', videoSheets.every(s => s.h === 640 && s.w >= 360), JSON.stringify(videoSheets));
+const videoShots = videoSheets.map(s => s.panels.length);
+check('a 100-second video is watched to its end: ten screenshots across it, on four sheets (the 3-second one: two)',
+  JSON.stringify(videoShots.slice().sort()) === JSON.stringify([1, 2, 3, 3, 3]), JSON.stringify(videoShots) + ' ' + traces.join(' ; '));
+const slideColors = slideSheets.flatMap(s => s.panels.map(([r, g, b]) => Math.abs(r - g) < 25 && Math.abs(g - b) < 25 ? 'gray' : r > 200 ? 'orange' : b > 150 && r < 90 ? 'blue' : g > 120 ? 'green' : 'purple'));
+check('every slide was screenshotted once it had loaded (never the gray loading picture), in order, on two sheets', slideSheets.length === 2 &&
   JSON.stringify(slideColors) === JSON.stringify(['blue', 'green', 'orange', 'purple']), JSON.stringify(slideSheets.map(s => s.panels)));
 
 await page.click('#autoClose');
@@ -191,7 +213,6 @@ await page.selectOption('#autoMode', 'transcript');
 check('transcript only hides "mark reviewed"', !(await page.isVisible('#autoMarkWrap')));
 await page.check('#autoRedo');
 await page.selectOption('#autoScope', 'all');
-await page.selectOption('#autoCap', '180');
 await page.click('#autoStart');
 await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three)/.test(document.getElementById('autoNow').textContent), null, { timeout: 90000 });
 const second = await page.textContent('#autoNow');

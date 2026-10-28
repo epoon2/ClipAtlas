@@ -37,8 +37,8 @@ test('what the browser sends is checked before anything is asked', () => {
   assert.equal(request().ok, true);
   assert.equal(readUnderstandRequest({ images: ['data:image/png;base64,AAAA'], categories: [] }).ok, false, 'JPEG only');
   assert.equal(readUnderstandRequest({ images: ['https://example.com/x.jpg'], categories: [] }).ok, false);
-  assert.equal(readUnderstandRequest({ images: Array(5).fill(IMAGE), categories: [] }).ok, false, 'at most four sheets');
-  assert.equal(readUnderstandRequest({ images: Array(4).fill(IMAGE), categories: [] }).images.length, 4);
+  assert.equal(readUnderstandRequest({ images: Array(7).fill(IMAGE), categories: [] }).ok, false, 'at most six sheets');
+  assert.equal(readUnderstandRequest({ images: Array(6).fill(IMAGE), categories: [] }).images.length, 6);
   assert.equal(readUnderstandRequest({ transcript: 'x' }).ok, false, 'categories are required');
   assert.equal(readUnderstandRequest([]).ok, false);
   assert.equal(readUnderstandRequest({ transcript: 'y'.repeat(9000), categories: [] }).transcript.length, 4000);
@@ -106,7 +106,7 @@ test('look, then decide: what each sheet shows goes to the text model with the t
   assert.match(prompt, /beef noodle soup at a busy stall/);
   assert.match(prompt, /BEST NOODLES/);
   assert.deepEqual([r.heard, r.seen, r.category, r.city, r.place], [true, true, 'Food', 'Taipei', 'Lin Dong Fang']);
-  assert.equal(r.onScreen, 'BEST NOODLES 📍Taipei / BEST NOODLES 📍Taipei');
+  assert.equal(r.onScreen, 'BEST NOODLES 📍Taipei', 'the same caption on both sheets is kept once');
 });
 
 test('a vision model that refuses every way is followed by the next model and way, which are remembered', async () => {

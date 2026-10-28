@@ -1,15 +1,16 @@
 // Auto-review: what a clip says, and what it is about.
 //
 // The browser plays the clip in TikTok's official embedded player, records the
-// tab's own sound and takes screenshots of the player while it plays: three
-// for a video, or one of every slide of a slideshow (the person shares the
-// ClipAtlas tab once per run). Nothing is downloaded from TikTok.
+// tab's own sound and takes screenshots of the player while it plays: about
+// one every 10 seconds of a video (played to its end), or one of every slide
+// of a slideshow once it has loaded (the person shares the ClipAtlas tab once
+// per run). Nothing is downloaded from TikTok.
 //
 //   /api/transcribe  one piece of the sound (a WAV of at most a minute) goes to
 //                    Whisper, an existing speech-to-text model; long clips are
 //                    sent a piece at a time and the words joined in the page.
 //   /api/understand  the transcript, the screenshots (sheets of up to three side
-//                    by side, at most four sheets) and the person's categories:
+//                    by side, at most six sheets) and the person's categories:
 //                    1. "look": a vision model says what each sheet shows and
 //                       writes out the text on it, in plain words;
 //                    2. "decide": a text model turns the transcript and what was
@@ -35,7 +36,7 @@ export const TEXT_MODELS = ['@cf/meta/llama-3.3-70b-instruct-fp8-fast', '@cf/met
 export const VISION = VISION_MODELS[0];
 export const TEXT = TEXT_MODELS[0];
 
-export const LIMITS = { audio: 3_200_000, image: 1_500_000, images: 4, transcript: 4000, piece: 2000, prompt: 3000,
+export const LIMITS = { audio: 3_200_000, image: 1_500_000, images: 6, transcript: 4000, piece: 2000, prompt: 3000,
   seen: 1500, onScreen: 1500, summary: 240, title: 100, place: 100, tag: 30, tags: 6, categories: 100, detail: 300 };
 
 // Cheap checks only: a full scan of a 2 MB string costs too much CPU on the
@@ -281,7 +282,7 @@ export async function understandClip(request, ai) {
     try {
       const seen = await look(ai, sheet);
       if (seen.shows) shows.push(seen.shows);
-      if (seen.onScreen) texts.push(seen.onScreen);
+      if (seen.onScreen && !texts.some(t => t.toLowerCase() === seen.onScreen.toLowerCase())) texts.push(seen.onScreen);  // the same caption on every sheet once
       out.seen = true;
     } catch (err) {
       lookFailure = failure(request.images.length > 1 ? `look ${i + 1}` : 'look', err);

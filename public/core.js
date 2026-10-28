@@ -503,11 +503,38 @@
     let sum = 0; for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
     return samples.length ? Math.sqrt(sum / samples.length) : 0;
   }
-  /** The seconds at which to take the screenshots, for a clip listened to for ``limit`` seconds. */
-  function shotTimes(limit) {
-    const want = [1.2, limit * 0.45, limit * 0.8].filter(t => t < limit);
-    return want.filter((t, i) => i === 0 || t - want[i - 1] >= 1);
+  /** The seconds at which to screenshot a video of ``length`` seconds: about
+      one every 10 seconds (at least 3, at most 18), from just after the start
+      to just before the end, never closer than a second apart. */
+  function shotTimes(length) {
+    const first = Math.min(1.2, length * 0.3), last = Math.max(first, length - 0.6);
+    const count = Math.max(3, Math.min(18, Math.round(length / 10)));
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? first : first + (last - first) * i / (count - 1);
+      if (!out.length || t - out[out.length - 1] >= 1) out.push(t);
+    }
+    return out;
   }
+  /* Small grayscale pictures of the player (from the shared tab), to tell
+     when a slide has finished loading: share of pixels that changed, and
+     whether the picture is one flat color (blank, still loading). */
+  function sigChange(a, b) {
+    if (!a || !b || a.length !== b.length) return 1;
+    let changed = 0;
+    for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 24) changed++;
+    return changed / a.length;
+  }
+  function sigFlat(a) {
+    if (!a || !a.length) return true;
+    // Flat when nearly all of it is one shade: a blank or a spinner on a blank.
+    const bins = new Array(11).fill(0);
+    for (let i = 0; i < a.length; i++) bins[Math.min(10, Math.floor(a[i] / 24))]++;
+    let best = 0;
+    for (let i = 0; i < 10; i++) best = Math.max(best, bins[i] + bins[i + 1]);
+    return best / a.length >= 0.92;
+  }
+
   const REVIEW_SCOPES = { review: 'Needs review', unsorted: 'Unsorted', all: 'All clips' };
   /** Clip ids to go through, newest saved first (the library's default order).
       scope: 'review' | 'unsorted' | 'all' | 'collection:<name>'. */
@@ -591,5 +618,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { playerUrl, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

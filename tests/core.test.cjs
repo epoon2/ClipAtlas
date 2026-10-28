@@ -248,8 +248,16 @@ test('sound helpers: WAV header, downsampling, loudness, screenshot times',()=>{
  assert.equal(v.getInt16(46,true),32767); assert.equal(v.getInt16(48,true),-32768);
  const d=C.downsample(new Float32Array(48000).fill(0.5),48000,16000); assert.equal(d.length,16000); assert.equal(d[100],0.5);
  assert.equal(C.loudness(new Float32Array(10)),0); assert.ok(Math.abs(C.loudness(new Float32Array(10).fill(0.5))-0.5)<1e-6);
- assert.deepEqual(C.shotTimes(45).map(t=>Math.round(t*10)/10),[1.2,20.3,36]);
- assert.deepEqual(C.shotTimes(2).map(t=>Math.round(t*10)/10),[1.2]);
+ assert.deepEqual(C.shotTimes(45).map(t=>Math.round(t*10)/10),[1.2,12,22.8,33.6,44.4],'about one every 10 seconds');
+ assert.deepEqual(C.shotTimes(12).map(t=>Math.round(t*10)/10),[1.2,6.3,11.4],'at least three');
+ assert.equal(C.shotTimes(600).length,18,'at most eighteen');
+ assert.deepEqual(C.shotTimes(2).map(t=>Math.round(t*10)/10),[0.6],'never closer than a second');
+ const flat=new Uint8Array(100).fill(40),busy=Uint8Array.from({length:100},(_,i)=>i%2?200:20);
+ assert.equal(C.sigFlat(flat),true); assert.equal(C.sigFlat(busy),false);
+ const spinner=Uint8Array.from({length:100},(_,i)=>i<5?250:12); assert.equal(C.sigFlat(spinner),true,'a spinner on a blank is still loading');
+ const edged=Uint8Array.from({length:100},(_,i)=>i%36===0?30:128); assert.equal(C.sigFlat(edged),true,'a thin dark edge does not make a blank look loaded');
+ assert.equal(C.sigChange(busy,busy),0); assert.equal(C.sigChange(flat,busy),0.5);
+ assert.equal(C.sigChange(busy,Uint8Array.from(busy,(v,i)=>i<3?255-v:v)),0.03);
 });
 test('transcript only: kept and searchable, nothing else changes; a details run picks it up later',()=>{
  const old=C.createRecord({id:'t',url:'https://www.tiktok.com/@a/video/7000000000000000007',category:'Unsorted'});

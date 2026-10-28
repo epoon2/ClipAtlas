@@ -576,7 +576,7 @@
   function autoEstimate(){
     const queue=C.autoQueue(state.records,$('#autoScope').value,{redo:$('#autoRedo').checked,mode:$('#autoMode').value});
     $('#autoMarkWrap').hidden=$('#autoMode').value==='transcript';
-    const minutes=Math.ceil(queue.length*(Math.min(Number($('#autoCap').value),60)+8)/60);
+    const minutes=Math.ceil(queue.length*50/60);  // most clips are under a minute; each plays to its end
     const short=state.records.filter(r=>!C.playerUrl(r)).length;
     $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
       (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
@@ -623,7 +623,7 @@
     if(!queue.length)return;
     let stream;
     try{
-      stream=await navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'browser',frameRate:5},
+      stream=await navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'browser',frameRate:10},
         audio:{suppressLocalAudioPlayback:true,echoCancellation:false,noiseSuppression:false,autoGainControl:false},
         preferCurrentTab:true,selfBrowserSurface:'include',surfaceSwitching:'exclude',systemAudio:'exclude'});
     }catch(err){
@@ -634,7 +634,7 @@
       stream.getTracks().forEach(t=>t.stop());
       $('#autoError').textContent='The tab\'s sound was not shared. Press Start again and turn on "Also share tab audio".';return;
     }
-    auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,cap:Number($('#autoCap').value),mark:mode==='details'&&$('#autoMark').checked,mode,
+    auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,mark:mode==='details'&&$('#autoMark').checked,mode,
       chunks:[],recording:false};
     $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
     $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
@@ -652,13 +652,10 @@
       const video=document.createElement('video');video.muted=true;video.playsInline=true;
       video.srcObject=new MediaStream(stream.getVideoTracks());await video.play();auto.video=video;
       try{auto.wake=await navigator.wakeLock?.request('screen');}catch(_){/* the screen may sleep; capture still works while the tab is open */}
-      for(;auto.index<auto.queue.length&&!auto.stop;auto.index++){
-        const r=state.records.find(x=>x.id===auto.queue[auto.index]);if(!r)continue;
-        autoCounts();
-        const res=await autoClip(r);
-        if(res.reason==='SHARING_STOPPED'||res.reason==='STOPPED')break;  // nothing saved for a clip cut short
-        if(res.stopRun){stopReason=res.message;break;}
-        const i=state.records.findIndex(x=>x.id===r.id);if(i<0)continue;
+      // Save one clip's result. False when the run has to stop.
+      const keep=async(r,res)=>{
+        if(res.stopRun){stopReason=res.message;auto.stop=true;return false;}
+        const i=state.records.findIndex(x=>x.id===r.id);if(i<0)return true;
         let next=C.applyUnderstanding(state.records[i],res,{markReviewed:auto.mark});
         // The library is one saved file of at most 2 MB: keep long transcripts short when it is nearly full.
         if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
@@ -666,11 +663,29 @@
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
         autoListItem(state.records[i],res);
         commit();await persist();
-        if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';break;}
+        if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';auto.stop=true;return false;}
         auto.failsInRow=res.status==='failed'?auto.failsInRow+1:0;
         if(res.detail)auto.lastDetail=res.detail;
-        if(auto.failsInRow>=3){stopReason=`Three clips in a row failed, so auto-review stopped.${auto.lastDetail?' Last problem: '+auto.lastDetail+'.':''} "Check the AI setup" tests each step.`;break;}
+        if(auto.failsInRow>=3){stopReason=`Three clips in a row failed, so auto-review stopped.${auto.lastDetail?' Last problem: '+auto.lastDetail+'.':''} "Check the AI setup" tests each step.`;auto.stop=true;return false;}
+        return true;
+      };
+      // The clip before's AI work runs while this one plays; its result is saved once this one has played.
+      let pending=null;
+      const settle=async()=>{
+        if(!pending)return true;
+        const {r,work}=pending;pending=null;
+        return keep(r,await work.catch(err=>({status:'failed',reason:'AI_FAILED',detail:String(err&&err.message||err)})));
+      };
+      for(;auto.index<auto.queue.length&&!auto.stop;auto.index++){
+        const r=state.records.find(x=>x.id===auto.queue[auto.index]);if(!r)continue;
+        autoCounts();
+        const got=await autoPlayClip(r);
+        if(got.done&&(got.done.reason==='SHARING_STOPPED'||got.done.reason==='STOPPED'))break;  // nothing saved for a clip cut short
+        if(!await settle())break;
+        if(got.done){if(!await keep(r,got.done))break;continue;}
+        pending={r,work:autoAnalyze(r,got)};
       }
+      if(pending){autoSay('Finishing the last clip…');await settle();}
     }catch(err){stopReason='Auto-review stopped: '+(err&&err.message||err);}
     finally{
       const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed;
@@ -701,11 +716,11 @@
     c.getContext('2d').drawImage(v,box.left*sx,box.top*sy,box.width*sx,box.height*sy,0,0,w,h);
     return c;
   }
-  // Sheets of up to three screenshots side by side, at most four sheets (twelve
+  // Sheets of up to three screenshots side by side, at most six sheets (eighteen
   // screenshots; a longer slideshow is sampled evenly, first and last kept).
   function autoSheets(shots){
     let pick=shots;
-    if(shots.length>12)pick=Array.from({length:12},(_,i)=>shots[Math.round(i*(shots.length-1)/11)]);
+    if(shots.length>18)pick=Array.from({length:18},(_,i)=>shots[Math.round(i*(shots.length-1)/17)]);
     const sheets=[];
     for(let i=0;i<pick.length;i+=3){
       const part=pick.slice(i,i+3),c=document.createElement('canvas');c.width=360*part.length;c.height=640;
@@ -764,6 +779,45 @@
     return data;
   }
   // Play one clip; resolve with what the Worker made of it (or why not).
+  // Videos play to the end (at most MAX_VIDEO seconds); slideshows are walked slide by slide.
+  const MAX_VIDEO=600,MAX_SLIDES=35;
+  let sigCanvas=null;
+  // A small grayscale picture of what the player shows right now, from the shared tab.
+  function autoSig(frame){
+    const v=auto&&auto.video;if(!v||!v.videoWidth)return null;
+    const box=frame.getBoundingClientRect(),sx=v.videoWidth/window.innerWidth,sy=v.videoHeight/window.innerHeight;
+    if(!sigCanvas){sigCanvas=document.createElement('canvas');sigCanvas.width=36;sigCanvas.height=64;}
+    const g=sigCanvas.getContext('2d',{willReadFrequently:true});
+    // A little in from the edges, so the frame around the player does not count.
+    const ix=box.width*0.06,iy=box.height*0.06;
+    g.drawImage(v,(box.left+ix)*sx,(box.top+iy)*sy,(box.width-2*ix)*sx,(box.height-2*iy)*sy,0,0,36,64);
+    const d=g.getImageData(0,0,36,64).data,out=new Uint8Array(36*64);
+    for(let i=0;i<out.length;i++)out[i]=(d[i*4]*3+d[i*4+1]*6+d[i*4+2])/10;
+    return out;
+  }
+  // Wait until a slide has finished loading: at least a second, the picture
+  // unchanged for 0.8 seconds, not one flat color (a blank, loading slide),
+  // and different from the slide before (unless 4 seconds pass). At most 10
+  // seconds of visible time; time while the tab is hidden does not count.
+  function autoSteady(frame,before,isDone){
+    return new Promise(resolve=>{
+      let last=null,calm=0,waited=0,tick=Date.now();
+      const step=()=>{
+        if(!auto||auto.stop||isDone())return resolve(null);
+        const now=Date.now();if(!document.hidden)waited+=now-tick;tick=now;
+        if(document.hidden)return setTimeout(step,250);
+        const sig=autoSig(frame);
+        if(sig){
+          calm=last&&C.sigChange(sig,last)<0.004?calm+1:0;last=sig;
+          const loaded=calm>=4&&waited>=1000&&!C.sigFlat(sig)&&(!before||C.sigChange(sig,before)>0.01||waited>=4000);
+          if(loaded||waited>=10000)return resolve(sig);
+        }else if(waited>=10000)return resolve(null);
+        setTimeout(step,200);
+      };
+      setTimeout(step,200);
+    });
+  }
+  // Play one clip; resolve with its sound (in auto.chunks) and screenshots, or why not.
   function autoPlay(r){
     return new Promise(resolve=>{
       const box=$('#autoFrame'),frame=document.createElement('iframe');
@@ -771,47 +825,65 @@
       frame.allow='autoplay; encrypted-media; fullscreen';frame.referrerPolicy='strict-origin-when-cross-origin';
       box.replaceChildren(frame);
       let lastError=null;
-      const started=Date.now();let ready=0,lastTick=0,limit=auto.cap,times=null,shots=[],timeEvents=false,unmutes=0,triedPlay=false,finished=false,now=0;
-      // A slideshow (photo post): walk every slide with the player's navigateTo and screenshot each one.
-      let slides=false,want=-1,askedAt=0,probed=false,slideTimer=null;
+      let started=Date.now(),ready=0,lastTick=0,length=MAX_VIDEO,times=null,shots=[],timeEvents=false,unmutes=0,triedPlay=false,finished=false,now=0;
+      let listening=false,paused=false,pausedAt=0;
+      // A slideshow (photo post): walk every slide with the player's navigateTo,
+      // wait until each one has finished loading, and screenshot it.
+      let slides=false,want=-1,askedAt=0,probed=false,waitingSlide=false,lastSig=null;
       const send=(type,value=null)=>{try{frame.contentWindow.postMessage({type,value,'x-tiktok-player':true},'https://www.tiktok.com');}catch(_){}};
-      const MAX_SLIDES=20;
       const goTo=i=>{want=i;askedAt=Date.now();send('navigateTo',i);autoSay(`Reading slide ${i+1}…`);};
       const onSlide=i=>{
         if(!slides){slides=true;shots=[];send('pause');goTo(0);if(i===0)onSlide(0);return;}
-        if(i!==want||slideTimer)return;
-        // Let the slide finish drawing before the screenshot.
-        slideTimer=setTimeout(()=>{slideTimer=null;shoot();if(want+1>=MAX_SLIDES)finish('SLIDES');else goTo(want+1);},800);
+        if(i!==want||waitingSlide)return;
+        waitingSlide=true;
+        autoSay(`Slide ${i+1}: waiting for it to load…`);
+        autoSteady(frame,lastSig,()=>finished).then(sig=>{
+          waitingSlide=false;if(finished)return;
+          if(sig)lastSig=sig;shoot();
+          if(want+1>=MAX_SLIDES)finish('SLIDES');else goTo(want+1);
+        });
       };
       const shoot=()=>{const s=autoShot(frame);if(s)shots.push(s);};
+      const record=on=>{auto.recording=on;try{auto.node.port.postMessage({record:on});}catch(_){}};
+      // Hidden tab: the browser stops drawing it, so screenshots would be stale. Pause until it is back.
+      const onVisible=()=>{
+        if(finished)return;
+        if(document.hidden&&!paused){
+          paused=true;pausedAt=Date.now();if(!slides)send('pause');record(false);
+          autoSay('Paused: this tab is hidden. Come back to it to continue.');
+        }else if(!document.hidden&&paused){
+          paused=false;const gap=Date.now()-pausedAt;started+=gap;if(ready)ready+=gap;askedAt+=gap;lastTick=Date.now();
+          if(!slides)send('play');if(listening)record(true);
+          autoSay('Continuing…');
+        }
+      };
       const finish=reason=>{
         if(finished)return;finished=true;
-        clearInterval(timer);window.removeEventListener('message',onMessage);
-        auto.recording=false;try{auto.node.port.postMessage({record:false});}catch(_){}
-        send('pause');auto.finishClip=null;
-        clearTimeout(slideTimer);
+        clearInterval(timer);window.removeEventListener('message',onMessage);document.removeEventListener('visibilitychange',onVisible);
+        record(false);send('pause');auto.finishClip=null;
         resolve({reason,shots,played:now,slides:slides?shots.length:0,error:lastError});
       };
       auto.finishClip=finish;
-      const startListening=()=>{if(auto.recording)return;auto.chunks=[];auto.recording=true;auto.node.port.postMessage({record:true});};
+      const startListening=()=>{if(listening)return;listening=true;auto.chunks=[];if(!paused)record(true);};
       const onMessage=e=>{
         if(e.source!==frame.contentWindow||e.origin!=='https://www.tiktok.com')return;
         let d=e.data;if(typeof d==='string'){try{d=JSON.parse(d);}catch(_){return;}}
         if(!d||typeof d.type!=='string')return;
         const v=d.value&&typeof d.value==='object'?d.value:d;
-        if(d.type==='onPlayerReady'){if(!ready){ready=Date.now();send('unMute');send('play');startListening();}}
+        if(d.type==='onPlayerReady'){if(!ready){ready=Date.now();send('unMute');if(!paused)send('play');startListening();}}
         else if(d.type==='onImageChange'){const i=Number(d.value&&typeof d.value==='object'?d.value.index??d.value.value:d.value);if(isFinite(i))onSlide(i);}
         else if(d.type==='onMute'&&d.value===true&&unmutes<3){unmutes++;send('unMute');}
         else if(d.type==='onStateChange'&&Number(d.value)===1)startListening();
-        else if(d.type==='onStateChange'&&Number(d.value)===0)finish('ENDED');
+        else if(d.type==='onStateChange'&&Number(d.value)===0&&!slides)finish('ENDED');
         else if(d.type==='onCurrentTime'){
           const t=Number(v.currentTime),dur=Number(v.duration);if(!isFinite(t))return;
           timeEvents=true;lastTick=Date.now();now=t;startListening();
           if(slides)return;  // a slideshow's music: the slides decide when it is done
-          if(!times&&dur>0){limit=Math.min(dur,auto.cap);times=C.shotTimes(limit);}
-          while(times&&times.length&&t>=times[0]){times.shift();shoot();}
-          autoSay(`Listening and looking · ${Math.floor(t)}s of ${Math.ceil(limit)}s`);
-          if(t>=limit-0.25)finish('LIMIT');
+          if(!times&&dur>0){length=Math.min(dur,MAX_VIDEO);times=C.shotTimes(length);}
+          // Not in the first 1.5 seconds: the shared tab can still show the clip before.
+          while(times&&times.length&&t>=times[0]&&Date.now()-ready>=1500){times.shift();shoot();}
+          if(!paused)autoSay(`Watching and listening · ${Math.floor(t)}s of ${Math.ceil(length)}s`);
+          if(t>=length-0.25)finish('ENDED');
         }
         else if(d.type==='onPlayerError'||d.type==='onError'){
           const code=Number(v.errorCode??d.value);
@@ -820,39 +892,47 @@
         }
       };
       window.addEventListener('message',onMessage);
+      document.addEventListener('visibilitychange',onVisible);
       autoSay('Loading the clip…');
+      onVisible();
       // Photo posts and quiet players may not report the time: fall back to the clock.
       const timer=setInterval(()=>{
+        if(paused)return;
         const t=Date.now();
         if(!ready&&t-started>20000)return finish('NO_PLAYER');
         // Ask for slide 2 once: a slideshow answers with onImageChange; a video ignores it.
         if(ready&&!probed&&t-ready>1200){probed=true;send('navigateTo',1);}
         if(slides){
           // No answer for the next slide: that was the last one.
-          if(!slideTimer&&t-askedAt>2500){if(!shots.length)shoot();finish('SLIDES');}
+          if(!waitingSlide&&t-askedAt>4000){if(!shots.length)shoot();finish('SLIDES');}
           return;
         }
         if(ready&&!timeEvents){
           const s=(t-ready)/1000;
           if(s>=2&&shots.length<1)shoot();if(s>=6&&shots.length<2)shoot();if(s>=10&&shots.length<3)shoot();
-          if(s>=Math.min(12,auto.cap))finish('NO_TIME');
+          if(s>=12)finish('NO_TIME');
         }
         if(timeEvents&&t-lastTick>15000)finish(shots.length?'STALLED_PART':'STALLED');
-        if(t-started>(auto.cap+40)*1000)finish('TIMEOUT');
+        if(t-started>(length+60)*1000)finish('TIMEOUT');
       },500);
     });
   }
-  async function autoClip(r){
+  // Play one clip, then take its sound (in pieces) and its screenshot sheets
+  // straight away, since the next clip reuses the recorder.
+  async function autoPlayClip(r){
     const played=await autoPlay(r);
-    if(played.reason==='SHARING_STOPPED')return {reason:'SHARING_STOPPED'};
-    if(played.reason==='STOPPED_BY_PERSON')return {reason:'STOPPED'};
+    if(played.reason==='SHARING_STOPPED')return {done:{reason:'SHARING_STOPPED'}};
+    if(played.reason==='STOPPED_BY_PERSON')return {done:{reason:'STOPPED'}};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
-      return {status:'unavailable',reason:played.reason,detail:played.error?`player error ${played.error}`:''};
+      return {done:{status:'unavailable',reason:played.reason,detail:played.error?`player error ${played.error}`:''}};
+    return {played,parts:autoAudio(),images:auto.mode==='transcript'?[]:autoSheets(played.shots)};
+  }
+  // The AI part of one clip. It runs while the next clip plays.
+  async function autoAnalyze(r,{played,parts,images}){
     // 1. What was said: each piece of sound through the speech-to-text model.
-    const parts=autoAudio(),words=[];let listenFailed=false,listenDetail='';
-    for(let i=0;i<parts.length;i++){
-      autoSay(parts.length>1?`Turning the sound into words (part ${i+1} of ${parts.length})…`:'Turning the sound into words…');
-      const heard=await autoPost('transcribe',{audio:parts[i]});
+    const words=[];let listenFailed=false,listenDetail='';
+    for(const part of parts){
+      const heard=await autoPost('transcribe',{audio:part});
       if(heard.stopRun)return heard;
       if(heard.status==='transcribed')words.push(heard.text);else if(heard.status==='failed'){listenFailed=true;listenDetail=heard.detail||heard.reason;}
     }
@@ -862,11 +942,9 @@
       return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_SAID'};
     }
     // 2. What it is about: the transcript and the screenshots.
-    const images=autoSheets(played.shots);
     const trace={clip:r.id,ended:played.reason,slides:played.slides,screenshots:played.shots.length,soundParts:parts.length,heardWords:transcript.length,listenDetail};
     if(!transcript&&!images.length){console.info('ClipAtlas auto-review',trace);
       return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail}:{status:'empty',reason:'NOTHING_TO_READ'};}
-    autoSay(played.slides?`Reading ${played.slides} slide${played.slides===1?'':'s'}…`:'Working out what it is about…');
     const data=await autoPost('understand',{transcript,images,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
     console.info('ClipAtlas auto-review',{...trace,result:data.status,reason:data.reason,detail:data.detail});
     if(data.stopRun)return data;
@@ -879,7 +957,7 @@
     $('#aiCheckBtn').addEventListener('click',checkSetup);
     $('#autoStart').addEventListener('click',startAuto);
     $('#autoStop').addEventListener('click',stopAuto);
-    for(const id of ['autoScope','autoCap'])$('#'+id).addEventListener('change',autoEstimate);
+    $('#autoScope').addEventListener('change',autoEstimate);
     $('#autoMode').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     $('#autoRedo').addEventListener('change',()=>{const keep=$('#autoScope').value;openAuto();$('#autoScope').value=keep;autoEstimate();});
     const close=()=>{if(auto&&!confirm('Stop auto-review and close?'))return;stopAuto();if(!auto)dlg.close();else{const wait=setInterval(()=>{if(!auto){clearInterval(wait);dlg.close();}},200);}};
