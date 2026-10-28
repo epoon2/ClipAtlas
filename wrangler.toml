@@ -15,6 +15,10 @@ AUTO_REVIEW_DAILY_LIMIT = "300"
 [ai]
 binding = "AI"
 
+# Gemini (Google's free tier) for auto-review is set up with secrets in the Cloudflare
+# dashboard, never here: GEMINI_API_KEY (required), GEMINI_USERS (sign-in emails allowed
+# to use it, comma-separated; recommended) and GEMINI_MODELS (optional). See the README.
+
 [[d1_databases]]
 binding = "DB"
 database_name = "clipatlas-db"

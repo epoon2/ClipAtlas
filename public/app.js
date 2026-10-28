@@ -719,9 +719,21 @@
     $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
       (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
     $('#autoStart').disabled=!queue.length||!autoSupported();
+    if(!auto&&$('#autoStart').dataset.ran)$('#autoStart').textContent=queue.length&&!$('#autoRedo').checked?`Continue · ${queue.length} left`:'Start again';
+  }
+  // Which AI services this site has for this account (Gemini needs its key as a Cloudflare secret).
+  let aiConfig={gemini:false,cloudflare:true};
+  async function loadAIConfig(){
+    try{const res=await fetch('/api/ai-config',{credentials:'same-origin'});if(res.ok)aiConfig={...aiConfig,...await res.json()};}catch(_){/* keep the last answer */}
+    const pick=$('#autoAI');
+    pick.querySelector('[value="gemini"]').disabled=!aiConfig.gemini;
+    if(!aiConfig.gemini)pick.value='cloudflare';
+    else{try{const kept=localStorage.getItem('ClipAtlasAutoAI');pick.value=kept==='cloudflare'?'cloudflare':'gemini';}catch(_){pick.value='gemini';}}
+    $('#autoAIHint').textContent=aiConfig.gemini?'Gemini first; when its free requests run out for the day, Cloudflare takes over.':'Gemini is not set up on this site yet (see the README: a free key from Google AI Studio).';
   }
   function openAuto(){
     if(!state.records.length){toast('Import or add some clips first.');return;}
+    loadAIConfig();
     const pick=$('#autoScope'),keep=pick.value||'review';
     pick.innerHTML=autoScopes().map(([k,label,n])=>`<option value="${html(k)}">${html(label)} (${n})</option>`).join('');
     pick.value=[...pick.options].some(o=>o.value===keep)?keep:'review';
@@ -732,6 +744,8 @@
     const dlg=$('#autoDialog');if(!dlg.open)dlg.showModal();
   }
   function autoSay(text){$('#autoNow').textContent=text;}
+  // Things the person should know about the run (the extension is off, Gemini is used up…), shown together.
+  function autoNote(text){if(!auto)return;if(!auto.notes.includes(text))auto.notes.push(text);$('#autoHint').textContent=auto.notes.join(' ');}
   function autoCounts(){
     const t=auto.tally;
     $('#autoCounts').textContent=`${auto.index>=auto.queue.length?'All '+auto.queue.length+' clips':'Clip '+(auto.index+1)+' of '+auto.queue.length} · ${auto.mode==='transcript'?(t.transcribed||0)+' transcribed':(t.understood||0)+' filled in'} · ${t.empty||0} nothing heard or seen · ${t.unavailable||0} would not play · ${t.failed||0} failed`;
@@ -749,15 +763,18 @@
   // What the run used of Cloudflare's free daily AI allowance (10,000 "neurons"), when the Worker could tell.
   const ALLOWANCE=10000;
   function autoUse(end){
-    if(!auto||auto.usePartial||!auto.neurons||!auto.useClips)return '';
-    const each=auto.neurons/auto.useClips,n=x=>Math.round(x).toLocaleString();
-    return end?` · AI: about ${n(auto.neurons)} neurons, ${n(each)} a clip (the free ${n(ALLOWANCE)} a day fits about ${n(ALLOWANCE/each)} clips)`
-      :` · AI: about ${n(auto.neurons)} of the free ${n(ALLOWANCE)} a day`;
+    if(!auto)return '';
+    const n=x=>Math.round(x).toLocaleString();
+    const gemini=auto.geminiCalls?` · Gemini: ${n(auto.geminiCalls)} request${auto.geminiCalls===1?'':'s'}${end?' (your daily limit is in Google AI Studio)':''}`:'';
+    if(auto.usePartial||!auto.neurons||!auto.useClips)return gemini;
+    const each=auto.neurons/auto.useClips;
+    return gemini+(end?` · Cloudflare: about ${n(auto.neurons)} neurons, ${n(each)} a clip (the free ${n(ALLOWANCE)} a day fits about ${n(ALLOWANCE/each)} clips)`
+      :` · Cloudflare: about ${n(auto.neurons)} of the free ${n(ALLOWANCE)} a day`);
   }
   // When Cloudflare's free AI allowance comes back (midnight UTC), in the person's own time.
-  function allowanceMessage(){
-    const at=C.allowanceResets(),time=at.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-    return `Cloudflare's free AI allowance for today is used up. It starts again ${at.toDateString()===new Date().toDateString()?'today':'tomorrow'} at ${time} (midnight UTC); press Start again then, and it carries on with the clips not done yet.`;
+  function allowanceMessage(geminiToo){
+    if(geminiToo)return `Both free AI allowances are used up for today: Cloudflare's comes back ${clockAt(C.allowanceResets())} (midnight UTC) and Gemini's ${clockAt(C.pacificMidnight())} (midnight Pacific). Press Start again then; it carries on with the clips not done yet.`;
+    return `Cloudflare's free AI allowance for today is used up. It starts again ${clockAt(C.allowanceResets())} (midnight UTC); press Start again then, and it carries on with the clips not done yet.`;
   }
   // What one clip gave: how many words were heard, how many screenshots or slides were read, and how long it took.
   function autoFacts(res,meta){
@@ -766,7 +783,7 @@
     const read=typeof res.read==='number'&&res.read<meta.shots&&!meta.slides?`${res.read} of `:'';
     return [words?`${words} word${words===1?'':'s'} heard`:'no speech heard',
       meta.slides?`${meta.slides} slide${meta.slides===1?'':'s'}`:meta.shots?`${read}${meta.shots} screenshot${meta.shots===1?'':'s'}${read?' read':''}`:'',
-      clock(meta.ms),C.speedLabel(meta.rate),meta.tries>1?'played on the second try':''].filter(Boolean).join(' · ');
+      clock(meta.ms),C.speedLabel(meta.rate),meta.tries>1?'played on the second try':'',auto&&auto.provider==='gemini'&&res.via?res.via:''].filter(Boolean).join(' · ');
   }
   function autoListItem(r,res,meta){
     const li=document.createElement('li');
@@ -807,8 +824,9 @@
     }
     auto={queue,index:0,stream,stop:false,tally:{},failsInRow:0,mark:mode==='details'&&$('#autoMark').checked,mode,
       chunks:[],recording:false,startedAt:Date.now(),pausedMs:0,pausedSince:0,finished:0,
-      speed:Number($('#autoSpeed').value)||1,neurons:0,useClips:0,usePartial:false,speedWarned:false};
-    try{localStorage.setItem('ClipAtlasAutoSpeed',String(auto.speed));}catch(_){/* remembered only when the browser allows */}
+      speed:Number($('#autoSpeed').value)||1,neurons:0,useClips:0,usePartial:false,speedWarned:false,
+      provider:aiConfig.gemini&&$('#autoAI').value!=='cloudflare'?'gemini':'cloudflare',cloudflare:aiConfig.cloudflare,geminiOff:'',geminiCalls:0,geminiTokens:0,notes:[]};
+    try{localStorage.setItem('ClipAtlasAutoSpeed',String(auto.speed));if(aiConfig.gemini)localStorage.setItem('ClipAtlasAutoAI',$('#autoAI').value);}catch(_){/* remembered only when the browser allows */}
     auto.clock=setInterval(autoTime,1000);autoTime();
     $('#autoSetup').hidden=true;$('#autoRun').hidden=false;$('#autoResults').replaceChildren();
     $('#autoStart').hidden=true;$('#autoStop').hidden=false;$('#autoHint').textContent='Keep this tab open and on screen while it works.';
@@ -838,7 +856,7 @@
         auto.finished++;
         if(res.use){auto.neurons+=res.use.neurons;auto.useClips++;if(res.use.partial)auto.usePartial=true;}
         if(meta&&C.speedMissing(auto.speed,meta.rate)&&!auto.speedWarned){auto.speedWarned=true;
-          $('#autoHint').textContent='Clips are playing at normal speed: the ClipAtlas playback speed extension does not seem to be on (see the README, "Playback speed").';}
+          autoNote('Clips are playing at normal speed: the ClipAtlas playback speed extension does not seem to be on (see the README, "Playback speed").');}
         autoListItem(state.records[i],res,meta);
         commit();await persist();
         if(saveBlocked){stopReason='Saving failed, so auto-review stopped. Download a backup.';auto.stop=true;return false;}
@@ -880,14 +898,16 @@
       clearInterval(auto.clock);autoTime();
       const took=Date.now()-auto.startedAt-auto.pausedMs;
       $('#autoTime').textContent=`Took ${clock(took)}${auto.finished?' · '+clock(took/auto.finished)+' a clip on average':''}${autoUse(true)}`;
-      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed,warned=auto.speedWarned;
+      const done=auto.index>=auto.queue.length,ended=auto.ended,t=auto.tally,trimmed=auto.trimmed,warned=auto.notes.length>0;
       autoCounts();
       autoCleanup();
       $('#autoStart').hidden=false;$('#autoStop').hidden=true;
       if(!warned)$('#autoHint').textContent='';
       if(done)$('#autoBar').style.width='100%';
       autoSay((stopReason||(done?'Done.':ended?'Tab sharing stopped, so auto-review stopped.':'Stopped.'))+` ${t.understood||0} filled in, ${t.transcribed?t.transcribed+' transcribed, ':''}${t.empty||0} nothing heard or seen, ${t.unavailable||0} would not play, ${t.failed||0} failed.`+(t.understood?' Filter Discoveries by "Auto-reviewed" to check them.':'')+(t.transcribed?' Transcripts show in Review clips and are searchable.':'')+(trimmed?' Your library is nearly full, so the last transcripts were kept short.':''));
-      $('#autoStart').textContent='Start again';
+      // What is left of this list: Start carries on with those (finished clips are saved and skipped).
+      const left=$('#autoRedo').checked?0:C.autoQueue(state.records,$('#autoScope').value,{mode:$('#autoMode').value}).length;
+      $('#autoStart').textContent=left?`Continue · ${left} left`:'Start again';$('#autoStart').dataset.ran='1';
       render();
     }
   }
@@ -930,8 +950,9 @@
     }
     return sheets;
   }
-  function wavBase64(samples){
-    const bytes=C.wavBytes(samples,16000);let bin='';
+  function wavBase64(samples){return wavBase64At(samples,16000);}
+  function wavBase64At(samples,rate){
+    const bytes=C.wavBytes(samples,rate);let bin='';
     for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
     return btoa(bin);
   }
@@ -950,23 +971,44 @@
       data=await res.json().catch(()=>({}));
       if(!data.steps)data={steps:[{step:'server',ok:false,detail:data.error||('answered '+res.status)}]};
     }catch(err){data={steps:[{step:'connection',ok:false,detail:String(err&&err.message||err)}]};}
-    const names={listen:'Listen (speech to text)',look:'Look (reading screenshots)',decide:'Decide (filling in details)'};
+    // Gemini, when it is set up: one request with the same tone and picture.
+    if(aiConfig.gemini){
+      const started=Date.now();
+      const body=JSON.stringify(C.geminiRequest({mode:'details',categories:categoryList().map(x=>({name:x.name,words:x.words||[]})),
+        audio:wavBase64(tone),images:[c.toDataURL('image/jpeg',0.85).split(',')[1]]}));
+      const res=await geminiPost(body);
+      const ms=Date.now()-started;
+      if(res.status==='ok'){const a=C.readGeminiAnswer(res.text,categoryList(),{audio:true,images:1});
+        data.steps.push({step:'gemini',ok:a.status!=='failed',ms,said:a.status==='failed'?a.detail:`${res.model}: read "${a.onScreen||a.shows||'nothing'}"`,detail:a.detail});}
+      else data.steps.push({step:'gemini',ok:false,ms,detail:res.detail||res.error||res.message||res.reason});
+    }
+    const names={listen:'Listen (speech to text)',look:'Look (reading screenshots)',decide:'Decide (filling in details)',gemini:'Gemini (all three in one)'};
     out.replaceChildren(...data.steps.map(st=>{const li=document.createElement('li');li.className=st.ok?'ok':'not';
       const b=document.createElement('strong');b.textContent=`${st.ok?'✓':'✗'} ${names[st.step]||st.step}`;
       li.append(b,document.createTextNode(` ${st.ms?'· '+(st.ms/1000).toFixed(1)+'s ':''}· ${st.ok?st.said:st.detail}`));return li;}));
     btn.disabled=false;
   }
-  // The recorded sound as base64 WAV pieces of at most 55 seconds, quiet pieces left out.
+  // The recorded sound of one clip, as 16 kHz samples (null when nothing was recorded).
   function autoAudio(){
-    const total=auto.chunks.reduce((n,c)=>n+c.length,0);if(!total)return [];
+    const total=auto.chunks.reduce((n,c)=>n+c.length,0);if(!total){auto.chunks=[];return null;}
     const all=new Float32Array(total);let at=0;for(const c of auto.chunks){all.set(c,at);at+=c.length;}
     auto.chunks=[];
-    const pcm=C.downsample(all,auto.ctx.sampleRate,16000),out=[];
+    return C.downsample(all,auto.ctx.sampleRate,16000);
+  }
+  // For Cloudflare: base64 WAV pieces of at most 55 seconds, quiet pieces left out.
+  function audioPieces(pcm){
+    const out=[];if(!pcm)return out;
     for(const [a,b] of C.pieces(pcm.length,16000,55)){
       const part=pcm.subarray(a,b);if(part.length<16000*0.8||C.loudness(part)<0.002)continue;
       out.push(wavBase64(part));
     }
     return out;
+  }
+  // For Gemini: the whole clip as one base64 WAV ('' when silent). Past 5 minutes it goes
+  // to 8 kHz so a 10-minute clip still fits Google's 20 MB (it hears speech at 16 kbps anyway).
+  function audioWhole(pcm){
+    if(!pcm||pcm.length<16000*0.8||C.loudness(pcm)<0.002)return '';
+    return pcm.length>16000*300?wavBase64At(C.downsample(pcm,16000,8000),8000):wavBase64(pcm);
   }
   async function autoPost(path,body){
     let res,data;
@@ -974,7 +1016,7 @@
       data=await res.json().catch(()=>({}));}
     catch(_){return {status:'failed',reason:'NETWORK'};}
     if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
-    if(res.status===429)return {stopRun:true,message:data.reason==='AI_DAILY_LIMIT'||!data.error?allowanceMessage():data.error};
+    if(res.status===429)return {stopRun:true,message:data.reason==='AI_DAILY_LIMIT'||!data.error?allowanceMessage(auto&&auto.geminiOff==='day'):data.error};
     if(res.status===503)return {stopRun:true,message:'Auto-review is not set up on the server yet (it needs the AI binding; see the README).'};
     if(!data.status)return {status:'failed',reason:'SERVER_'+res.status};
     return data;
@@ -1038,12 +1080,12 @@
       // wait until each one has finished loading, and screenshot it.
       let slides=false,want=-1,askedAt=0,probed=false,waitingSlide=false,lastSig=null;
       const send=(type,value=null)=>{try{frame.contentWindow.postMessage({type,value,'x-tiktok-player':true},'https://www.tiktok.com');}catch(_){}};
-      const goTo=i=>{want=i;askedAt=Date.now();send('navigateTo',i);autoSay(`Reading slide ${i+1}…`);};
+      const goTo=i=>{want=i;askedAt=Date.now();send('navigateTo',i);if(!paused)autoSay(`Reading slide ${i+1}…`);};
       const onSlide=i=>{
         if(!slides){slides=true;shots=[];send('pause');goTo(0);if(i===0)onSlide(0);return;}
         if(i!==want||waitingSlide)return;
         waitingSlide=true;
-        autoSay(`Slide ${i+1}: waiting for it to load…`);
+        if(!paused)autoSay(`Slide ${i+1}: waiting for it to load…`);
         autoSteady(frame,lastSig,()=>finished).then(sig=>{
           waitingSlide=false;if(finished)return;
           if(sig)lastSig=sig;shoot();
@@ -1152,10 +1194,63 @@
     if(played.reason==='STOPPED_BY_PERSON'||played.reason==='STOPPED_BY_RUN')return {done:{reason:'STOPPED'}};
     if(['NO_PLAYER','NOT_FOUND','PLAYBACK','AUTOPLAY','STALLED'].includes(played.reason))
       return {done:{status:'unavailable',reason:played.reason,detail:[played.error&&`player error ${played.error}`,tries>1&&'tried twice'].filter(Boolean).join(', ')}};
-    return {played,parts:autoAudio(),shots:auto.mode==='transcript'?[]:played.shots};
+    return {played,pcm:autoAudio(),shots:auto.mode==='transcript'?[]:played.shots};
   }
   // The AI part of one clip. It runs while the next clip plays.
-  async function autoAnalyze(r,{played,parts,shots}){
+  async function autoAnalyze(r,got){
+    if(auto.provider==='gemini'&&!auto.geminiOff){
+      const res=await geminiAnalyze(r,got);
+      if(!res.fallback)return res;
+      // Gemini cannot take more today (or is not working): the rest of the run uses Cloudflare.
+      if(!auto.geminiOff){auto.geminiOff=res.why;
+        autoNote(res.why==='day'?`Gemini's free requests are used up for today (they come back ${clockAt(C.pacificMidnight())}); continuing with Cloudflare.`
+          :`Gemini did not work (${res.detail||res.why}); continuing with Cloudflare.`);}
+      if(!auto.cloudflare)return {stopRun:true,message:geminiStopMessage(res)};
+    }
+    return cloudflareAnalyze(r,got);
+  }
+  const clockAt=d=>`${d.toDateString()===new Date().toDateString()?'today':'tomorrow'} at ${d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`;
+  function geminiStopMessage(res){
+    return res.why==='day'?`Gemini's free requests are used up for today. They come back ${clockAt(C.pacificMidnight())} (midnight Pacific); press Start again then, and it carries on with the clips not done yet.`
+      :`Gemini did not work, and Cloudflare's AI is not set up: ${res.detail||res.why}.`;
+  }
+  // One clip through Gemini: one request with the clip's sound and its screenshot sheets.
+  async function geminiAnalyze(r,{played,pcm,shots}){
+    const audio=audioWhole(pcm);
+    const picked=auto.mode==='transcript'?[]:C.pickShots(shots.map(autoShotSig),{slides:played.slides>0,words:0}).map(i=>shots[i]);
+    const images=autoSheets(picked).map(u=>u.slice(u.indexOf(',')+1));
+    if(!audio&&!images.length)return auto.mode==='transcript'?{status:'empty',reason:'NOTHING_SAID',via:'Gemini'}:{status:'empty',reason:'NOTHING_TO_READ',via:'Gemini'};
+    const body=JSON.stringify(C.geminiRequest({mode:auto.mode,categories:categoryList().map(c=>({name:c.name,words:c.words||[]})),audio,images}));
+    for(let tries=0;;tries++){
+      const res=await geminiPost(body);
+      if(res.stopRun)return res;
+      if(res.status==='ok'){
+        auto.geminiCalls++;auto.geminiTokens+=(res.usage?.prompt||0)+(res.usage?.output||0);
+        const out=C.readGeminiAnswer(res.text,categoryList(),{mode:auto.mode,audio:!!audio,images:images.length});
+        console.info('ClipAtlas auto-review',{clip:r.id,via:'gemini',model:res.model,ended:played.reason,tries:played.tries,slides:played.slides,screenshots:shots.length,
+          read:picked.length,sheets:images.length,audioSeconds:audio?Math.round(pcm.length/16000):0,result:out.status,finish:res.finish});
+        return {...out,via:'Gemini',read:picked.length,detail:out.detail||(res.finish&&res.finish!=='STOP'?'gemini: '+res.finish:'')};
+      }
+      // Too many at once: wait as long as Google says (at most a minute) and try again, a few times.
+      if(res.reason==='GEMINI_BUSY'&&tries<4&&!auto.stop){await new Promise(ok=>setTimeout(ok,Math.min(60,Math.max(1,res.retryAfter||20))*1000));continue;}
+      if(res.reason==='GEMINI_FAILED'&&tries<1&&!auto.stop){await new Promise(ok=>setTimeout(ok,5000));continue;}
+      if(res.reason==='GEMINI_DAILY_LIMIT')return {fallback:true,why:'day'};
+      if(['GEMINI_KEY','GEMINI_REGION','GEMINI_NO_MODEL','GEMINI_NOT_SET_UP'].includes(res.reason))return {fallback:true,why:'setup',detail:res.detail||res.error||res.reason};
+      return {status:'failed',reason:'AI_FAILED',detail:res.detail||res.reason,via:'Gemini'};
+    }
+  }
+  async function geminiPost(body){
+    let res,data;
+    try{res=await fetch('/api/gemini',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body});
+      data=await res.json().catch(()=>({}));}
+    catch(_){return {status:'failed',reason:'GEMINI_FAILED',detail:'connection problem',retryAfter:5};}
+    if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
+    if(data.reason==='CLIPATLAS_LIMIT')return {stopRun:true,message:data.error};
+    if(!data.status)return {status:'failed',reason:'GEMINI_FAILED',detail:'answered '+res.status};
+    return data;
+  }
+  async function cloudflareAnalyze(r,{played,pcm,shots}){
+    const parts=audioPieces(pcm);
     // How much of Cloudflare's daily AI allowance this clip used, as the Worker reports it.
     const use={neurons:0,partial:false};
     const count=d=>{if(typeof d.neurons==='number')use.neurons+=d.neurons;else use.partial=true;};
@@ -1169,8 +1264,8 @@
     }
     const transcript=words.join(' ').trim().slice(0,4000);
     if(auto.mode==='transcript'){
-      if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript,use};
-      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use}:{status:'empty',reason:'NOTHING_SAID',use};
+      if(transcript)return {status:'transcribed',reason:'TRANSCRIBED',heard:true,transcript,use,via:'Cloudflare'};
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use,via:'Cloudflare'}:{status:'empty',reason:'NOTHING_SAID',use,via:'Cloudflare'};
     }
     // 2. Which screenshots to read: every slide; for a video, no repeats, and fewer when plenty was said.
     const wordCount=transcript.split(/\s+/).filter(Boolean).length;
@@ -1180,12 +1275,12 @@
     const trace={clip:r.id,ended:played.reason,tries:played.tries,slides:played.slides,screenshots:shots.length,read:picked.length,sheets:images.length,
       speed:played.rate?Math.round(played.rate*100)/100:0,soundParts:parts.length,heardWords:wordCount,listenDetail};
     if(!transcript&&!images.length){console.info('ClipAtlas auto-review',trace);
-      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use}:{status:'empty',reason:'NOTHING_TO_READ',use};}
+      return listenFailed?{status:'failed',reason:'AI_FAILED',detail:listenDetail,use,via:'Cloudflare'}:{status:'empty',reason:'NOTHING_TO_READ',use,via:'Cloudflare'};}
     const data=await autoPost('understand',{transcript,images,categories:categoryList().map(c=>({name:c.name,words:c.words||[]}))});
     if(!data.stopRun)count(data);
     console.info('ClipAtlas auto-review',{...trace,result:data.status,reason:data.reason,detail:data.detail,neurons:use.partial?'unknown':Math.round(use.neurons)});
     if(data.stopRun)return data;
-    return {...data,transcript,read:picked.length,use,detail:[data.detail,listenFailed&&listenDetail].filter(Boolean).join('; ')};
+    return {...data,transcript,read:picked.length,use,via:'Cloudflare',detail:[data.detail,listenFailed&&listenDetail].filter(Boolean).join('; ')};
   }
   function stopAuto(){if(auto){auto.stop=true;autoSay('Stopping…');auto.finishClip?.('STOPPED_BY_PERSON');}}
   function initAuto(){

@@ -103,6 +103,30 @@ else {
 }
 </script>`;
 
+// ---- a fake Gemini (Google's API), reached by the Worker through the global fetch
+const gemini = { mode: 'ok', busyOnce: false, calls: [] };
+const realFetch = globalThis.fetch;
+const googleJSON = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+globalThis.fetch = async (url, init) => {
+  if (!String(url).startsWith('https://generativelanguage.googleapis.com/')) return realFetch(url, init);
+  const body = JSON.parse(new TextDecoder().decode(init.body)), parts = body.contents[0].parts;
+  const audio = parts.find(p => p.inlineData && p.inlineData.mimeType === 'audio/wav');
+  const wav = audio ? Buffer.from(audio.inlineData.data, 'base64') : null;
+  gemini.calls.push({ key: init.headers['x-goog-api-key'], prompt: parts[0].text, seconds: wav ? (wav.length - 44) / 2 / wav.readUInt32LE(24) : 0,
+    loudness: wav ? loud(wav) : 0, images: parts.filter(p => p.inlineData && p.inlineData.mimeType === 'image/jpeg').map(p => 'data:image/jpeg;base64,' + p.inlineData.data),
+    categories: body.generationConfig.responseSchema.properties.category?.enum || [] });
+  if (gemini.mode === 'day') return googleJSON(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded for metric: generate_content_free_tier_requests, limit: 250',
+    details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', quotaValue: '250' }] }] } });
+  if (gemini.busyOnce) { gemini.busyOnce = false; return googleJSON(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded, limit: 10',
+    details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', quotaValue: '10' }] },
+      { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1s' }] } }); }
+  const said = wav && loud(wav) > 0.01;
+  return googleJSON(200, { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify({ transcript: said ? 'the best beef noodles in taipei' : '',
+    on_screen_text: 'BEST BEEF NOODLES TAIPEI', shows: 'A bowl of noodles.', creator: '@noodle.fan', title: 'Gemini noodles', summary: 'A noodle shop.',
+    place: 'Lin Dong Fang', city: 'Taipei', country: 'Taiwan', category: 'Food', tags: ['noodles'] }) }] } }],
+    usageMetadata: { promptTokenCount: 2000, candidatesTokenCount: 150 } });
+};
+
 const env = { DB: memoryD1(), AI, ASSETS: { fetch: async () => new Response('not used') } };
 const { server, base } = await startSite(env);
 
@@ -188,7 +212,7 @@ await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three)/.tes
 const summary = await page.textContent('#autoNow');
 const took = await page.textContent('#autoTime');
 check('the run says how long it took and how much of the free AI allowance it used',
-  /^Took \d+:\d\d · \d+:\d\d a clip on average · AI: about [\d,]+ neurons, [\d,]+ a clip \(the free 10,000 a day fits about [\d,]+ clips\)$/.test(took), took);
+  /^Took \d+:\d\d · \d+:\d\d a clip on average · Cloudflare: about [\d,]+ neurons, [\d,]+ a clip \(the free 10,000 a day fits about [\d,]+ clips\)$/.test(took), took);
 const facts = await page.$$eval('#autoResults li small', els => els.map(e => e.textContent));
 check('each clip says what was heard and read, how long it took, the speed, and a second try', facts.length === 4 && facts.filter(f => !f).length === 1 &&
   facts.some(f => /^\d+ words heard · 3 screenshots · 0:0\d · 1\.5× · played on the second try$/.test(f)) &&
@@ -298,6 +322,55 @@ await page.waitForFunction(() => /^(Stopped|Auto-review stopped|Three|Cloudflare
 const limited = await page.textContent('#autoNow');
 check('when the free AI allowance is used up, it says when it starts again', /^Cloudflare's free AI allowance for today is used up\. It starts again (today|tomorrow) at \d{1,2}:00\s?[AP]M \(midnight UTC\)/.test(limited), limited);
 AI.limit = false;
+await page.click('#autoClose');
+
+// ---- Gemini: the key is set as a Cloudflare secret; one request a clip, Cloudflare when it is used up
+env.GEMINI_API_KEY = 'test-key';
+const runAuto = async () => {
+  await page.click('#startAuto');
+  await page.waitForFunction(() => !document.querySelector('#autoAI [value="gemini"]').disabled);
+  await page.check('#autoRedo'); await page.selectOption('#autoMode', 'details'); await page.selectOption('#autoScope', 'all');
+  await page.evaluate(() => { document.getElementById('autoNow').textContent = ''; });
+  await page.click('#autoStart');
+  await page.waitForFunction(() => /^(Done|Stopped|Auto-review stopped|Three|Cloudflare|Both|Gemini)/.test(document.getElementById('autoNow').textContent), null, { timeout: 120000 });
+  return page.textContent('#autoNow');
+};
+await page.click('#startAuto');
+await page.waitForFunction(() => !document.querySelector('#autoAI [value="gemini"]').disabled);
+check('with the key set, the dialog offers Gemini first', await page.inputValue('#autoAI') === 'gemini' && /Gemini first/.test(await page.textContent('#autoAIHint')));
+await page.click('#aiCheckBtn');
+await page.waitForFunction(() => !document.getElementById('aiCheckBtn').disabled && /Gemini/.test(document.getElementById('aiCheckOut').textContent));
+const geminiCheck = (await page.$$eval('#aiCheckOut li', els => els.map(e => e.textContent))).find(t => /Gemini/.test(t)) || '';
+check('the setup check tries Gemini too', /^✓ Gemini \(all three in one\).*gemini-3\.8-flash: read "BEST BEEF NOODLES TAIPEI"/.test(geminiCheck), geminiCheck);
+await page.click('#autoClose');
+gemini.calls.length = 0; gemini.busyOnce = true;
+const cfBefore = asked.length;
+const viaGemini = await runAuto();
+const gFacts = await page.$$eval('#autoResults li small', els => els.map(e => e.textContent));
+check('a Gemini run fills the clips with one request each (after waiting once when asked to slow down)', /^Done\. 3 filled in, 0 nothing heard or seen, 1 would not play/.test(viaGemini) &&
+  gemini.calls.length === 4 && asked.length === cfBefore && gFacts.filter(f => / · Gemini$/.test(f)).length === 3, viaGemini + ' ' + JSON.stringify(gFacts) + ' calls ' + gemini.calls.length);
+check('each request carried the whole clip\'s sound (16 kHz WAV) and its screenshot sheets; the slideshow, sheets only',
+  // (one of the four is the same request again, after the "slow down"; which clip that was varies)
+  new Set(gemini.calls.filter(c => c.seconds > 1.5 && c.loudness > 0.01).map(c => c.images.length)).size === 2 &&
+  gemini.calls.some(c => !c.seconds && c.images.length === 2) &&
+  gemini.calls.every(c => c.key === 'test-key' && c.categories.includes('Food') && /Its sound is (not )?attached/.test(c.prompt)), JSON.stringify(gemini.calls.map(c => [c.seconds.toFixed(1), c.images.length])));
+check('the time line counts the Gemini requests', / · Gemini: 3 requests \(your daily limit is in Google AI Studio\)$/.test(await page.textContent('#autoTime')), await page.textContent('#autoTime'));
+await page.click('#autoClose');
+await page.fill('#search', 'Lin Dong Fang');
+check('what Gemini found is filled in (the place was empty)', (await page.$$('#clipGrid .clip-card')).length === 3);
+await page.fill('#search', '');
+
+gemini.mode = 'day'; ignoreRate = false;
+const cfBefore2 = asked.filter(a => a.model.includes('whisper')).length;
+const fellBack = await runAuto();
+check('when Gemini is used up for today, the run goes on with Cloudflare and says so', /^Done\. 3 filled in/.test(fellBack) &&
+  asked.filter(a => a.model.includes('whisper')).length > cfBefore2 && /Gemini's free requests are used up for today \(they come back (today|tomorrow) at .+\); continuing with Cloudflare\./.test(await page.textContent('#autoHint')),
+  fellBack + ' / ' + await page.textContent('#autoHint'));
+await page.click('#autoClose');
+AI.limit = true;
+const both = await runAuto();
+check('when both are used up, it stops and says when each comes back', /^Both free AI allowances are used up for today: Cloudflare's comes back (today|tomorrow) at .+ \(midnight UTC\) and Gemini's (today|tomorrow) at .+ \(midnight Pacific\)\./.test(both), both);
+AI.limit = false; gemini.mode = 'ok';
 await page.click('#autoClose');
 check('no CSP problems and no page errors', (await page.evaluate(() => window.__csp)).length === 0 && errors.length === 0,
   JSON.stringify(await page.evaluate(() => window.__csp)) + ' ' + errors.join(' | '));
