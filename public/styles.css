@@ -118,3 +118,39 @@
 .trip-move{display:flex;flex-direction:column;gap:3px}.trip-move button{border:1px solid #dce9de;border-radius:6px;background:#fff;color:#4a7468;font-size:11px;width:28px;height:19px;padding:0;line-height:1}
 .overview-foot{display:flex;gap:14px;justify-content:space-between;align-items:center;flex-wrap:wrap;background:#e5f2e9;border-radius:13px;padding:14px 18px}.overview-foot strong{color:#173b3c}.overview-foot small{display:block;color:#567a70;font-size:12px;margin-top:3px}.overview-actions{display:flex;gap:8px}
 @media(max-width:600px){.trip-city{flex-direction:column;gap:10px}.trip-city-days{width:100%;justify-content:space-between}.trip-move{flex-direction:row}.overview-head .field{flex:1 1 100%}.overview-actions{width:100%}.overview-actions button{flex:1}}
+
+/* Places inside a clip */
+.clip-places{font-size:12px;color:#3f6a62;margin:6px 0;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.stop-places{font-size:12px;color:#5d7a72;margin:0 0 6px}
+.places-edit #editPlaces{display:grid;gap:6px}
+.place-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.2fr) minmax(0,1fr) minmax(0,2fr) auto;gap:6px;align-items:center}
+.place-row input,.place-row select{border:1px solid #dae4dd;padding:8px 9px;border-radius:8px;background:#fff;color:#183d3c;min-width:0;font-size:13px}
+.place-row .pl-remove{padding:6px 9px}
+.places-edit-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px}
+@media(max-width:600px){.place-row{grid-template-columns:1fr 1fr auto}.place-row .pl-name{grid-column:1/3;grid-row:1}.place-row .pl-remove{grid-column:3;grid-row:1}.place-row .pl-type{grid-column:1}.place-row .pl-city{grid-column:2/4}.place-row .pl-note{grid-column:1/4}}
+
+/* Ask about a collection */
+.ask-panel[hidden]{display:none}.ask-panel{background:#fff;border:1px solid #dfe9e3;border-radius:14px;padding:14px 18px;margin-bottom:18px}
+.ask-panel summary{cursor:pointer;display:flex;align-items:baseline;gap:10px;list-style:none}.ask-panel summary::-webkit-details-marker{display:none}
+.ask-panel summary::after{content:'▾';margin-left:auto;color:#8aa39a}.ask-panel:not([open]) summary::after{content:'▸'}
+.ask-title{font-weight:800;color:#173b3c;font-size:15px}.ask-panel summary small{color:#7c8f88}
+.ask-body{margin-top:12px;display:grid;gap:12px}
+#askInput{width:100%;border:1px solid #dae4dd;border-radius:10px;padding:11px 12px;font:inherit;resize:vertical;color:#183d3c}
+.ask-actions{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.ask-answers{display:grid;gap:12px}.ask-item{border:1px solid #e8eee9;border-radius:12px;padding:14px 16px;background:#fbfcfa}
+.ask-q{margin:0 0 8px;font-weight:750;color:#173b3c}.ask-a{color:#2b4a47;line-height:1.6;font-size:14px;overflow-wrap:anywhere}
+.ask-a h4{margin:12px 0 6px;font-size:15px;color:#173b3c}.ask-a h5{margin:10px 0 4px;font-size:13px;color:#2f5f56}.ask-a p{margin:6px 0}.ask-a ul,.ask-a ol{margin:4px 0;padding-left:20px}
+.ask-a code{background:#eef3ef;border-radius:4px;padding:0 4px}
+.cite{display:inline-block;min-width:18px;padding:0 5px;margin-left:2px;border-radius:9px;background:#e4f1ea;color:#2f6b5c;font-size:11px;font-weight:800;text-decoration:none;border:0;line-height:18px;text-align:center;cursor:pointer;vertical-align:1px}
+.cite:hover{background:#cfe7da}.cite.missing{background:#f2f2ef;color:#9aa5a0;cursor:default}
+.ask-meta{margin:10px 0 0;font-size:12px;color:#7c8f88}
+
+/* Notes and web links */
+.kind-buttons{display:flex;gap:6px;flex-wrap:wrap}.kind-buttons button{border:1px solid #dae4dd;background:#fff;border-radius:9px;padding:8px 12px;font-weight:700;color:#3f6a62}
+.kind-buttons button[aria-pressed="true"]{background:#173a3e;border-color:#173a3e;color:#fff}
+.body-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.kind-badge{font-size:10px;font-weight:800;letter-spacing:.08em;color:#6b7f78;background:#eef2ee;border-radius:10px;padding:3px 8px}
+.edit-dialog .tiktok-only[hidden],#urlField[hidden],#bodyField[hidden],#kindPick[hidden]{display:none}
+.clip-card.kind-link .clip-card-head{background:linear-gradient(135deg,#e2ebf3,#eef3f6)}.clip-card.kind-note .clip-card-head{background:linear-gradient(135deg,#f5eedb,#f8f4e8)}
+.card-flags .kind-badge{align-self:flex-start}
+.stop-from{font-size:11px;color:#6f857d}.from-note{font-size:13px;padding:0 4px}

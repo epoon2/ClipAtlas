@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { memoryD1, startSite } from './site.mjs';
+import { resetGeminiForTests } from '../src/gemini.js';
 
 const { chromium } = createRequire(import.meta.url)('playwright');
 const IDS = { noodles: '7000000000000000001', market: '7000000000000000002', gone: '7000000000000000004', slides: '7000000000000000005' };
@@ -44,6 +45,7 @@ const AI = { broken: false, limit: false, async run(model, input) {
     return { response: 'SHOWS: A bowl of noodles.\nTEXT: BEST BEEF NOODLES TAIPEI', usage };
   }
   const prompt = input.messages?.[0]?.content || '';   // decide: JSON
+  if (/^You answer questions/.test(prompt)) return { response: 'From Cloudflare: **Lin Dong Fang** [1]' };
   asked.push({ model, decide: true, prompt, json: !!input.response_format });
   const said = !/\(nothing said\)/.test(prompt);
   return { response: JSON.stringify({ title: said ? 'Beef noodles in Taipei' : 'Taipei food slides', summary: 'A noodle shop worth the line.',
@@ -104,12 +106,18 @@ else {
 </script>`;
 
 // ---- a fake Gemini (Google's API), reached by the Worker through the global fetch
-const gemini = { mode: 'ok', busyOnce: false, calls: [] };
+const gemini = { mode: 'ok', busyOnce: false, calls: [], asks: [] };
 const realFetch = globalThis.fetch;
 const googleJSON = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 globalThis.fetch = async (url, init) => {
   if (!String(url).startsWith('https://generativelanguage.googleapis.com/')) return realFetch(url, init);
   const body = JSON.parse(new TextDecoder().decode(init.body)), parts = body.contents[0].parts;
+  if (!body.generationConfig.responseSchema) {   // a question about the clips: Markdown with numbered sources
+    gemini.asks.push({ model: decodeURIComponent(/models\/([^:]+):/.exec(String(url))[1]), prompt: parts[0].text });
+    if (gemini.mode === 'day') return googleJSON(429, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded, limit: 20',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', quotaValue: '20' }] }] } });
+    return googleJSON(200, { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '## Noodles\n\n- **Lin Dong Fang**, beef noodles [1][2]\n- Raohe [9]' }] } }] });
+  }
   const audio = parts.find(p => p.inlineData && p.inlineData.mimeType === 'audio/wav');
   const wav = audio ? Buffer.from(audio.inlineData.data, 'base64') : null;
   gemini.calls.push({ key: init.headers['x-goog-api-key'], prompt: parts[0].text, seconds: wav ? (wav.length - 44) / 2 / wav.readUInt32LE(24) : 0,
@@ -123,7 +131,8 @@ globalThis.fetch = async (url, init) => {
   const said = wav && loud(wav) > 0.01;
   return googleJSON(200, { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify({ transcript: said ? 'the best beef noodles in taipei' : '',
     on_screen_text: 'BEST BEEF NOODLES TAIPEI', shows: 'A bowl of noodles.', creator: '@noodle.fan', title: 'Gemini noodles', summary: 'A noodle shop.',
-    place: 'Lin Dong Fang', city: 'Taipei', country: 'Taiwan', category: 'Food', tags: ['noodles'] }) }] } }],
+    place: 'Lin Dong Fang', city: 'Taipei', country: 'Taiwan', category: 'Food', tags: ['noodles'],
+    places: [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: 'Taiwan', note: 'beef noodle soup' }, { name: 'Raohe Night Market', type: 'food', city: 'Taipei', note: '' }] }) }] } }],
     usageMetadata: { promptTokenCount: 2000, candidatesTokenCount: 150 } });
 };
 
@@ -341,7 +350,7 @@ check('with the key set, the dialog offers Gemini first', await page.inputValue(
 await page.click('#aiCheckBtn');
 await page.waitForFunction(() => !document.getElementById('aiCheckBtn').disabled && /Gemini/.test(document.getElementById('aiCheckOut').textContent));
 const geminiCheck = (await page.$$eval('#aiCheckOut li', els => els.map(e => e.textContent))).find(t => /Gemini/.test(t)) || '';
-check('the setup check tries Gemini too', /^✓ Gemini \(all three in one\).*gemini-3\.8-flash: read "BEST BEEF NOODLES TAIPEI"/.test(geminiCheck), geminiCheck);
+check('the setup check tries Gemini too', /^✓ Gemini \(all three in one\).*gemini-3\.5-flash-lite: read "BEST BEEF NOODLES TAIPEI"/.test(geminiCheck), geminiCheck);
 await page.click('#autoClose');
 gemini.calls.length = 0; gemini.busyOnce = true;
 const cfBefore = asked.length;
@@ -358,6 +367,8 @@ check('the time line counts the Gemini requests', / · Gemini: 3 requests \(your
 await page.click('#autoClose');
 await page.fill('#search', 'Lin Dong Fang');
 check('what Gemini found is filled in (the place was empty)', (await page.$$('#clipGrid .clip-card')).length === 3);
+const placeLines = await page.$$eval('#clipGrid .clip-places', els => els.map(e => e.textContent));
+check('and every place it named, one by one', placeLines.length === 3 && placeLines.every(t => t === '📍 2 places: Lin Dong Fang · Raohe Night Market'), JSON.stringify(placeLines));
 await page.fill('#search', '');
 
 gemini.mode = 'day'; ignoreRate = false;
@@ -372,6 +383,30 @@ const both = await runAuto();
 check('when both are used up, it stops and says when each comes back', /^Both free AI allowances are used up for today: Cloudflare's comes back (today|tomorrow) at .+ \(midnight UTC\) and Gemini's (today|tomorrow) at .+ \(midnight Pacific\)\./.test(both), both);
 AI.limit = false; gemini.mode = 'ok';
 await page.click('#autoClose');
+
+// ---- Ask about the clips: Gemini's stronger model reads them all; the answer cites them and is kept
+resetGeminiForTests();   // a new day: the models used up above have requests again
+await page.click('#askPanel summary');
+await page.fill('#askInput', 'Where should I eat?');
+await page.click('#askButton');
+await page.waitForSelector('.ask-item');
+const ask = await page.evaluate(() => { const a = document.querySelector('.ask-item');
+  return { q: a.querySelector('.ask-q').textContent, h: a.querySelector('.ask-a h4')?.textContent, cites: [...a.querySelectorAll('a.cite')].map(c => c.getAttribute('href')),
+    missing: a.querySelectorAll('.cite.missing').length, meta: a.querySelector('.ask-meta').textContent }; });
+check('Ask: the answer shows with its sources as links to the clips', ask.q === 'Where should I eat?' && ask.h === 'Noodles' && ask.cites.length === 2 &&
+  ask.cites.every(h => /^https:\/\/[\w.]*tiktokv?\.com\//.test(h)) && ask.missing === 1 && /from 5 items · gemini-3\.8-flash/.test(ask.meta), JSON.stringify(ask));
+check('the question went to Gemini with every clip as a numbered source', gemini.asks.length === 1 && gemini.asks[0].model === 'gemini-3.8-flash' &&
+  /Question: Where should I eat\?/.test(gemini.asks[0].prompt) && /\[5\] TikTok: /.test(gemini.asks[0].prompt) && /BEST BEEF NOODLES TAIPEI/.test(gemini.asks[0].prompt));
+gemini.mode = 'day';
+await page.click('.ask-item [data-action="ask-again"]');
+await page.waitForFunction(() => /From Cloudflare/.test(document.querySelector('.ask-item .ask-a')?.textContent || ''), null, { timeout: 20000 });
+check('when Gemini is used up, Cloudflare answers, and Ask again replaces the old answer', (await page.$$('.ask-item')).length === 1 &&
+  /llama-3\.3-70b/.test(await page.textContent('.ask-item .ask-meta')), await page.textContent('.ask-item .ask-meta'));
+gemini.mode = 'ok';
+await page.waitForTimeout(400);
+await page.waitForFunction(() => /Saved to your account/.test(document.getElementById('saveStatus').textContent));
+await page.reload(); await page.waitForSelector('#appShell:not([hidden])');
+check('saved answers are there after a reload', (await page.$$('.ask-item')).length === 1);
 check('no CSP problems and no page errors', (await page.evaluate(() => window.__csp)).length === 0 && errors.length === 0,
   JSON.stringify(await page.evaluate(() => window.__csp)) + ' ' + errors.join(' | '));
 

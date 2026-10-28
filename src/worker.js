@@ -1,7 +1,8 @@
 // ClipAtlas API — Cloudflare Worker + D1, with a private library per account.
 import {readTikTokLink,lookupTikTok,MESSAGES} from './tiktok.js';
-import {readUnderstandRequest,understandClip,readTranscribeRequest,transcribeAudio,checkAI,MESSAGES as UNDERSTAND} from './understand.js';
+import {readUnderstandRequest,understandClip,readTranscribeRequest,transcribeAudio,checkAI,readAskRequest,askText,MESSAGES as UNDERSTAND} from './understand.js';
 import {relayGemini,geminiAllowed,GEMINI_MAX} from './gemini.js';
+import {readPageRequest,readPage} from './readpage.js';
 const encoder = new TextEncoder();
 const JSON_HEADERS = {'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
 const MAX_STATE = 2 * 1024 * 1024;
@@ -74,6 +75,24 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   const result=listen?await transcribeAudio(request.audio,env.AI):await understandClip(request,env.AI);
   return response(result,result.reason==='AI_DAILY_LIMIT'?429:200);
  }
+ // The text of a web page saved in a collection (src/readpage.js).
+ if(path==='/api/readpage'&&method==='POST'){
+  let body;try{body=await jsonBody(req,4096);}catch{return response({status:'failed',reason:'BAD_LINK'},400);}
+  const request=readPageRequest(body);
+  if(!request.ok)return response({status:'failed',reason:request.reason},400);
+  if(await blocked(env,'readpage:'+user.id,100,86400000))return response({status:'failed',reason:'CLIPATLAS_LIMIT',error:'Page reading limit reached (100 a day); paste the text instead.'},429);
+  return response(await readPage(request.url));
+ }
+ // A question about a collection, on Cloudflare's text model (the page uses Gemini first).
+ if(path==='/api/ask'&&method==='POST'){
+  if(!env.AI)return response({status:'failed',reason:'AI_NOT_SET_UP',error:'Cloudflare AI is not set up on this server.'},503);
+  let body;try{body=await jsonBody(req,300000);}catch{return response({status:'failed',reason:'BAD_INPUT',error:UNDERSTAND.BAD_INPUT},400);}
+  const request=readAskRequest(body);
+  if(!request.ok)return response({status:'failed',reason:'BAD_INPUT',error:UNDERSTAND.BAD_INPUT},400);
+  if(await blocked(env,'ask:'+user.id,60,86400000))return response({status:'failed',reason:'CLIPATLAS_LIMIT',error:'Question limit reached (60 a day); try again tomorrow.'},429);
+  const result=await askText(request.prompt,env.AI);
+  return response(result,result.reason==='AI_DAILY_LIMIT'?429:200);
+ }
  // Which AI services auto-review can use on this site, for this account.
  if(path==='/api/ai-config'&&method==='GET')return response({gemini:geminiAllowed(env,user.email),cloudflare:!!env.AI});
  // Auto-review through Gemini: the page's request is passed on unread (see src/gemini.js), with the key added here.
@@ -85,7 +104,7 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   if(await blocked(env,'gemini:'+user.id,clips*2,86400000))return response({status:'failed',reason:'CLIPATLAS_LIMIT',error:`Auto-review limit reached (${clips} clips a day); continue tomorrow.`},429);
   const body=await req.arrayBuffer();
   if(!body.byteLength||body.byteLength>GEMINI_MAX)return response({status:'failed',reason:'BAD_INPUT',error:'That clip is too large to send.'},413);
-  const out=await relayGemini(body,env);const {http,...rest}=out;
+  const out=await relayGemini(body,env,fetch,url.searchParams.get('for')==='ask'?'ask':'clip');const {http,...rest}=out;
   return response(rest,out.status==='ok'?200:http||502);
  }
  // Auto-review setup check: each model once on a tiny test sound and picture, with the real error if one fails.

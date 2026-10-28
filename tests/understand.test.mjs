@@ -1,7 +1,7 @@
 // src/understand.js and its routes (/api/transcribe, /api/understand, /api/aicheck), with Workers AI replaced by a fake.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readUnderstandRequest, readTranscribeRequest, transcribeAudio, parseReply, cleanAnswer, understandClip, buildPrompt,
+import { readUnderstandRequest, readTranscribeRequest, transcribeAudio, parseReply, cleanAnswer, understandClip, buildPrompt, readAskRequest, askText,
   readLook, checkAI, resetForTests, WHISPER, VISION, TEXT, VISION_MODELS, TEXT_MODELS } from '../src/understand.js';
 import worker from '../src/worker.js';
 
@@ -97,6 +97,13 @@ test('a look reply is split into what it shows, the text on it and who posted it
   assert.deepEqual(readLook({ response: 'SHOWS: A cafe.\nTEXT: xiao yin tea house\nCREATOR: @lzv670' }),
     { shows: 'A cafe.', onScreen: 'xiao yin tea house', creator: '@lzv670' });
   assert.deepEqual(readLook({ response: 'Just a description.' }), { shows: 'Just a description.', onScreen: '', creator: '' });
+});
+
+test('decide also lists every place the clip names, checked', async () => {
+  const places = [{ name: ' Lin Dong Fang ', type: 'Food', city: 'Taipei', note: 'beef noodles' }, { name: '' }, 'bad', { name: 'Raohe', type: 'food' }];
+  const r = await understandClip(request(), fakeAI({ reply: JSON.stringify({ ...ANSWER, places }) }));
+  assert.deepEqual(r.places, [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: '', note: 'beef noodles' }, { name: 'Raohe', type: 'food', city: '', country: '', note: '' }]);
+  assert.match(buildPrompt(CATEGORIES, 'x', 'y'), /"places": \[every place the video names/);
 });
 
 test('look, then decide: what each sheet shows goes to the text model with the transcript, in JSON mode', async () => {
@@ -231,6 +238,18 @@ test('each answer says how much of the free daily allowance it used, when every 
   assert.equal(unknown.neurons, undefined, 'no token counts: not guessed');
 });
 
+test('a question about a collection goes to the text model; a used-up allowance says so', async () => {
+  assert.equal(readAskRequest({ prompt: 'x'.repeat(120_001) }).ok, false);
+  assert.equal(readAskRequest({ prompt: '  ' }).ok, false);
+  assert.equal(readAskRequest({ prompt: 'Where to eat?' }).ok, true);
+  const ai = fakeAI({ reply: '## Eat\n- Lin Dong Fang [1]' });
+  const r = await askText('Where to eat?', ai);
+  assert.deepEqual([r.status, r.text, r.model], ['ok', '## Eat\n- Lin Dong Fang [1]', 'llama-3.3-70b-instruct-fp8-fast']);
+  assert.equal(ai.calls[0].input.messages[0].content, 'Where to eat?');
+  const spent = await askText('q', fakeAI({ fail: Object.fromEntries(TEXT_MODELS.map(m => [m, '4006: daily free allocation'])) }));
+  assert.deepEqual([spent.status, spent.reason], ['failed', 'AI_DAILY_LIMIT']);
+});
+
 test('the setup check tries every step and reports each one', async () => {
   const ok = await checkAI({ audio: AUDIO, image: IMAGE }, fakeAI());
   assert.equal(ok.ok, true);
@@ -282,6 +301,10 @@ test('/api/transcribe and /api/understand: answers, limits and bad input', async
   assert.equal(second.status, 429);
   assert.equal((await second.json()).reason, 'CLIPATLAS_LIMIT');
   for (let i = 0; i < 4; i++) assert.equal((await postTo('transcribe', capped, { audio: AUDIO })).status, 200, 'four pieces per clip');
+  const asked = await postTo('ask', env(), { prompt: 'Where to eat?' });
+  assert.equal(asked.status, 200);
+  assert.equal((await asked.json()).status, 'ok');
+  assert.equal((await postTo('ask', env(), { prompt: '' })).status, 400);
   assert.equal((await postTo('transcribe', capped, { audio: AUDIO })).status, 429);
   const spent = await postTo('transcribe', env({ ai: fakeAI({ fail: { [WHISPER]: '4006: daily free allocation' } }) }), { audio: AUDIO });
   assert.equal(spent.status, 429);

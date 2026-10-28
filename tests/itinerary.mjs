@@ -81,15 +81,15 @@ const board = await page.$$eval('#itineraryCities .city-panel', els => els.map(p
   groups: [...p.querySelectorAll('.city-group')].map(g => [g.querySelector('h4').textContent.replace(/\s+/g, ' ').trim(), [...g.querySelectorAll('.city-item strong')].map(s => s.textContent)]) })));
 check('cities with the most clips first, the clips with no city last', JSON.stringify(board.map(b => b.city)) === '["📍 Taipei","📍 Tainan","City not known yet"]', JSON.stringify(board.map(b => b.city)));
 check('a city says its country, how many are saved and planned, and its days', board[0].about === 'Taiwan · 5 saved · 1 planned · Day 1, 3', board[0].about);
-check('inside a city: food, then shops, then activities (the category order), each clip once',
-  JSON.stringify(board[0].groups) === JSON.stringify([['🍜 Taiwan · Food 3', ['Din Tai Fung original', 'Raohe night market', 'Beef noodles at Lin Dong Fang']],
-    ['🛍️ Taiwan · Shopping 1', ['Ximending shopping street']], ['🏮 Taiwan · Activities 1', ['Taipei 101 at sunset']]]), JSON.stringify(board[0].groups));
+check('inside a city: food, then shopping, then activities (the five kinds in order), each once, named by its place',
+  JSON.stringify(board[0].groups) === JSON.stringify([['🍜 Food 3', ['Din Tai Fung original', 'Raohe night market', 'Lin Dong Fang']],
+    ['🛍️ Shopping 1', ['Ximending shopping street']], ['🎟️ Activities 1', ['Taipei 101 at sunset']]]), JSON.stringify(board[0].groups));
 check('the clips with no city say how to place them', await page.isVisible('.city-unknown') && !(await page.$eval('.city-unknown', d => d.open)));
-const planned = await page.$eval(`[data-city-plan="${records[3].id}"]`, s => s.selectedOptions[0].textContent);
+const planned = await page.$eval(`[data-city-plan="${records[3].id}#"]`, s => s.selectedOptions[0].textContent);
 check('a planned clip shows its day', planned === 'Day 1 · Taipei', planned);
-await page.selectOption(`[data-city-plan="${records[0].id}"]`, '3');
-await page.selectOption(`[data-city-plan="${records[5].id}"]`, '2');
-await page.selectOption(`[data-city-plan="${records[3].id}"]`, '0');
+await page.selectOption(`[data-city-plan="${records[0].id}#"]`, '3');
+await page.selectOption(`[data-city-plan="${records[5].id}#"]`, '2');
+await page.selectOption(`[data-city-plan="${records[3].id}#"]`, '0');
 await page.click('[data-itinerary-view="days"]');
 const stops = await page.$$eval('#itineraryDays .day-panel', els => els.map(e => [...e.querySelectorAll('.stop h4')].map(h => h.textContent)));
 check('picking a day in By city plans it there; "Not planned" takes it off', JSON.stringify(stops) === JSON.stringify([[], ['Tainan breakfast crawl'], ['Beef noodles at Lin Dong Fang']]), JSON.stringify(stops));
@@ -119,14 +119,14 @@ check('a stop in another city than its day\'s says so', JSON.stringify(away) ===
 // Overview: what the Taiwan clips add up to, days per city, and Fill the days (with Undo).
 await page.click('[data-itinerary-view="overview"]');
 const sum = await page.textContent('.overview-sum');
-check('the overview sums up the country\'s clips', /^8 clips in 2 cities/.test(sum) && /🍜 4 Food · 🛍️ 1 Shopping · 🏮 2 Activities · 🧳 1 Travel tips/.test(sum), sum);
+check('the overview sums up the country\'s places', /^8 places in 2 cities/.test(sum) && /from 8 clips · 🍜 Food 4 · 🛍️ Shopping 1 · 🏯 Sightseeing 1 · 🎟️ Activities 2/.test(sum), sum);
 check('it names the country and says what has no city yet', /Taiwan \(8\)/.test(await page.textContent('#tripCountry')) &&
-  /^1 clip has no city yet/.test(await page.textContent('.overview-note')), await page.textContent('.overview-note'));
+  /^1 place has no city yet/.test(await page.textContent('.overview-note')), await page.textContent('.overview-note'));
 const cityRows = () => page.$$eval('.trip-city', els => els.map(e => [e.querySelector('h3').firstChild.textContent.trim(), e.querySelector('[data-trip-days]').value]));
 check('each city with its days, taken from the days already set', JSON.stringify(await cityRows()) === '[["📍 Taipei","1"],["📍 Tainan","1"]]', JSON.stringify(await cityRows()));
 const places = await page.$$eval('.trip-city:first-child .trip-places .chip', els => els.map(e => e.textContent));
 check('a city lists its named places', JSON.stringify(places) === '["Lin Dong Fang"]', JSON.stringify(places));
-await page.uncheck('[data-trip-include="Travel tips"]');
+await page.uncheck('[data-trip-include="sightseeing"]');
 await page.click('.trip-city:nth-child(2) [data-action="trip-move"][data-step="-1"]');
 await page.fill('[data-trip-days="Taipei"]', '2'); await page.press('[data-trip-days="Taipei"]', 'Tab');
 check('days and order can be changed, and it says what the trip becomes', JSON.stringify(await cityRows()) === '[["📍 Tainan","1"],["📍 Taipei","2"]]' &&
@@ -164,6 +164,34 @@ check('days and their cities survive a reload', JSON.stringify(kept) === '["2",[
 await page.screenshot({ path: '/tmp/clipatlas-itinerary-days.png', fullPage: true });
 await page.click('[data-itinerary-view="cities"]');
 await page.screenshot({ path: '/tmp/clipatlas-itinerary-cities.png', fullPage: true });
+
+// A TikTok that names several places: each is its own stop, linked back to the TikTok.
+await page.click('.nav-link[data-tab="library"]');
+await page.locator('#clipGrid .clip-card', { has: page.locator('h3', { hasText: 'Ximending shopping street' }) }).locator('[data-action="edit"]').click();
+await page.waitForSelector('#editDialog[open]');
+for (const [name, type] of [['Wanted Shop', 'shopping'], ['Snow King Ice Cream', 'food']]) {
+  await page.click('#addPlace');
+  const row = page.locator('#editPlaces .place-row').last();
+  await row.locator('.pl-name').fill(name); await row.locator('.pl-type').selectOption(type);
+}
+check('a new place takes the clip\'s city', (await page.$$eval('#editPlaces .pl-city', els => els.map(e => e.value))).every(v => v === 'Taipei'));
+await page.click('#editForm [type="submit"]');
+const placeLine = await page.locator('#clipGrid .clip-card', { has: page.locator('h3', { hasText: 'Ximending shopping street' }) }).locator('.clip-places').textContent();
+check('the card lists its places', placeLine === '📍 2 places: Wanted Shop · Snow King Ice Cream', placeLine);
+await page.click('.nav-link[data-tab="itinerary"]');
+await page.click('[data-itinerary-view="cities"]');
+const taipei = await page.$$eval('#itineraryCities .city-panel[data-city-key="taipei"] .city-group', els => els.map(g => [g.querySelector('h4').textContent.replace(/\s+/g, ' ').trim(), [...g.querySelectorAll('.city-item strong')].map(x => x.textContent)]));
+check('By city: each place on its own, under its kind; the clip itself no longer listed',
+  JSON.stringify(taipei) === JSON.stringify([['🍜 Food 4', ['Din Tai Fung original', 'Snow King Ice Cream', 'Raohe night market', 'Lin Dong Fang']], ['🛍️ Shopping 1', ['Wanted Shop']], ['🎟️ Activities 1', ['Taipei 101 at sunset']]]), JSON.stringify(taipei));
+const iceCream = page.locator('#itineraryCities .city-item', { has: page.locator('strong', { hasText: 'Snow King Ice Cream' }) });
+check('a place says which TikTok it is from', /from “Ximending shopping street”/.test(await iceCream.locator('span').textContent()));
+await iceCream.locator('select').selectOption('1');
+await page.click('[data-itinerary-view="days"]');
+const day1 = await page.$$eval('#itineraryDays .day-panel:first-child .stop', els => els.map(e => [e.querySelector('h4').textContent, e.querySelector('a').textContent]));
+check('the place is a stop of its own, linked to its TikTok', JSON.stringify(day1) === JSON.stringify([['Airport tips', 'View original TikTok ↗'], ['Snow King Ice Cream', 'From “Ximending shopping street” ↗']]), JSON.stringify(day1));
+const [placesFile] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan')]);
+const placesMd = fs.readFileSync(await placesFile.path(), 'utf8');
+check('the export names the place, its kind and where it came from', /\*\*Snow King Ice Cream\*\* \(Food\) — Taipei, Taiwan\n   - From: Ximending shopping street \(https:/.test(placesMd), placesMd.slice(0, 400));
 
 // A phone: nothing wider than the screen, in either view.
 await page.setViewportSize({ width: 390, height: 844 });

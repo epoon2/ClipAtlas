@@ -218,6 +218,17 @@ await page.selectOption('#bulkMove', 'Hikes');
 check('Move to category moves the picked clip', (await page.$$eval('#clipGrid .category', els => els.map(e => e.textContent))).includes('Hikes'));
 await page.click('#bulkReviewed');
 check('Mark reviewed marks it', /Marked 1 clip reviewed/.test(await page.textContent('#toast')));
+// Collections: a new one from the bar, then out of it again.
+await page.click('#bulkAll');
+page.once('dialog', d => d.accept('Taiwan trip'));
+await page.selectOption('#bulkCollect', 'new');
+check('Add to a new collection puts every picked clip in it', new RegExp(`^Added ${total} clips to Taiwan trip`).test(await page.textContent('#toast')) &&
+  /Taiwan trip/.test(await page.textContent('#collectionNav')), await page.textContent('#toast'));
+await page.click('#bulkClear');
+await page.click('#clipGrid .clip-card h3');
+await page.selectOption('#bulkCollect', 'drop:Taiwan trip');
+check('Take out of a collection', /^Took 1 clip out of Taiwan trip/.test(await page.textContent('#toast')) &&
+  (await page.$eval('[data-collection="Taiwan trip"] small', e => e.textContent)) === String(total - 1), await page.textContent('#toast'));
 await page.click('#bulkDone');
 check('Done leaves select mode', !(await page.isVisible('#bulkBar')) && (await page.$$('#clipGrid .pick')).length === 0);
 

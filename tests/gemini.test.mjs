@@ -1,7 +1,7 @@
 // src/gemini.js and /api/gemini, /api/ai-config, with Google's API replaced by a fake.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { relayGemini, readGeminiError, readGeminiReply, geminiAllowed, modelList, resetGeminiForTests, GEMINI_MODELS } from '../src/gemini.js';
+import { relayGemini, readGeminiError, readGeminiReply, geminiAllowed, modelList, resetGeminiForTests, GEMINI_MODELS, GEMINI_ASK_MODELS } from '../src/gemini.js';
 import worker from '../src/worker.js';
 
 test.beforeEach(() => resetGeminiForTests());
@@ -62,13 +62,13 @@ test('slow down: said at once, with how long to wait; used up on every model: sa
   assert.deepEqual([r.status, r.reason, r.retryAfter, r.http, busy.calls.length], ['failed', 'GEMINI_BUSY', 20, 429, 1]);
   resetGeminiForTests();
   const day = quota('GenerateRequestsPerDayPerProjectPerModel-FreeTier', '250');
-  const spent = fakeGoogle({ [GEMINI_MODELS[0]]: [[429, day]], [GEMINI_MODELS[1]]: [[429, day]] });   // the third model does not exist
+  const spent = fakeGoogle({ [GEMINI_MODELS[0]]: [[429, day]], [GEMINI_MODELS[1]]: [[429, day]] });   // the others do not exist
   const d = await relayGemini(BODY, ENV, spent.fetcher);
   assert.deepEqual([d.reason, d.http], ['GEMINI_DAILY_LIMIT', 429], 'used up beats "no such model"');
-  assert.equal(spent.calls.length, 3, 'each model tried once');
+  assert.equal(spent.calls.length, GEMINI_MODELS.length, 'each model tried once');
   const later = await relayGemini(BODY, ENV, spent.fetcher);
   assert.equal(later.reason, 'GEMINI_DAILY_LIMIT', 'then not asked again for a while, and still said as "used up"');
-  assert.equal(spent.calls.length, 3);
+  assert.equal(spent.calls.length, GEMINI_MODELS.length);
 });
 
 test('a wrong key is not retried on other models; a model list can be set', async () => {
@@ -77,6 +77,9 @@ test('a wrong key is not retried on other models; a model list can be set', asyn
   assert.deepEqual([r.reason, g.calls.length], ['GEMINI_KEY', 1]);
   assert.deepEqual(modelList({ GEMINI_MODELS: ' gemini-x-flash , bad model!, gemini-y ' }), ['gemini-x-flash', 'gemini-y']);
   assert.deepEqual(modelList({}), GEMINI_MODELS);
+  assert.equal(GEMINI_MODELS[0], 'gemini-3.5-flash-lite', 'clips: the 500-a-day models first');
+  assert.equal(modelList({}, 'ask')[0], 'gemini-3.8-flash', 'questions: the stronger model first');
+  assert.deepEqual(modelList({ GEMINI_ASK_MODELS: 'gemini-z' }, 'ask'), ['gemini-z']);
 });
 
 test('who may use it: needs the key; GEMINI_USERS limits it to those accounts', () => {
@@ -107,7 +110,7 @@ const call = (path, e, init = {}) => worker.fetch(new Request('https://clipatlas
 
 test('/api/ai-config and /api/gemini', async () => {
   const realFetch = globalThis.fetch;
-  const g = fakeGoogle({ [GEMINI_MODELS[0]]: [[200, ANSWER]] });
+  const g = fakeGoogle({ [GEMINI_MODELS[0]]: [[200, ANSWER]], [GEMINI_ASK_MODELS[0]]: [[200, ANSWER]] });
   globalThis.fetch = (url, init) => String(url).startsWith('https://generativelanguage.googleapis.com/') ? g.fetcher(String(url), init) : realFetch(url, init);
   try {
     assert.deepEqual(await (await call('ai-config', env())).json(), { gemini: false, cloudflare: true });
@@ -118,6 +121,8 @@ test('/api/ai-config and /api/gemini', async () => {
     const data = await ok.json();
     assert.deepEqual([ok.status, data.status, data.text, data.http], [200, 'ok', '{"title":"Noodles"}', undefined]);
     assert.equal(new TextDecoder().decode(g.calls.at(-1).body), '{"contents":[{"parts":[{"text":"hi"}]}]}', 'passed on as sent');
+    const asked = await (await call('gemini?for=ask', env({ GEMINI_API_KEY: 'k' }), { method: 'POST', body: '{}' })).json();
+    assert.equal(asked.model, GEMINI_ASK_MODELS[0], 'a question goes to the stronger model');
     const big = await call('gemini', env({ GEMINI_API_KEY: 'k' }), { method: 'POST', body: 'x'.repeat(20 * 1024 * 1024) });
     assert.equal(big.status, 413);
     const capped = env({ GEMINI_API_KEY: 'k', AUTO_REVIEW_DAILY_LIMIT: '1' });

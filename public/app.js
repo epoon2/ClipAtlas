@@ -7,7 +7,7 @@
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   const html = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
-  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7, dayCities: {} });
+  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7, dayCities: {}, questions: [] });
   let state = emptyState();
   let currentTab = 'library', activeCollection = '', editingId = null, saveTimer = null;
   let selecting = false; const selected = new Set();  // choosing many clips at once
@@ -124,31 +124,101 @@
   function renderStats() {
     $('#statClips').textContent=state.records.length;
     $('#statCollections').textContent=listCollections().length;
-    $('#statReview').textContent=state.records.filter(x=>x.status!=='reviewed').length;
+    $('#statReview').textContent=state.records.filter(x=>C.isClip(x)&&x.status!=='reviewed').length;
     $('#statPlan').textContent=state.plan.length;
   }
+  /* ---- Ask about a collection: the AI answers from what the collection's clips hold ---- */
+  // The items asked about: the open collection (or every clip), newest saved first.
+  const scopeRecords=()=>state.records.filter(r=>!activeCollection||(r.collections||[]).includes(activeCollection))
+    .sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
+  let asking=false,aiConfigLoaded=false;
+  const reading=new Set();   // web pages and notes the AI is reading right now
+  const hostOf=u=>{try{return new URL(u).hostname.replace(/^www\./,'');}catch(_){return '';}};
+  const askSay=t=>{$('#askStatus').textContent=t;};
+  function renderAsk(){
+    const panel=$('#askPanel');if(!panel)return;
+    panel.hidden=!state.records.length;if(panel.hidden)return;
+    const recs=scopeRecords(),scope=activeCollection||'';
+    $('#askScope').textContent=scope||'all your clips';
+    $('#askCount').textContent=plural(recs.length,'item','items');
+    $('#askInput').placeholder=scope?`Ask anything about “${scope}”: where to eat in a city, which places several sources recommend, everything sorted by city and then food, sights, activities and shopping…`
+      :'Ask anything about your saved clips: where to eat in a city, which places several sources recommend, everything sorted by city…';
+    const byId=new Map(state.records.map(r=>[r.id,r]));
+    $('#askAnswers').innerHTML=(state.questions||[]).filter(q=>q.scope===scope).map(q=>{
+      const sources=q.ids.map(id=>{const r=byId.get(id);return r?{id:r.id,title:r.title||r.place||'',url:r.kind==='note'?'':r.url}:null;});
+      const when=q.at?new Date(q.at).toLocaleDateString([],{month:'short',day:'numeric'}):'';
+      return `<article class="ask-item"><p class="ask-q">${html(q.q)}</p><div class="ask-a">${C.renderAnswer(q.a,sources)}</div><p class="ask-meta">${html([when,`from ${plural(q.count,'item','items')}`,q.model].filter(Boolean).join(' · '))} <button type="button" class="link-inline" data-action="ask-again" data-id="${html(q.id)}">Ask again</button> <button type="button" class="link-inline" data-action="ask-delete" data-id="${html(q.id)}">Delete</button></p></article>`;
+    }).join('');
+  }
+  // Gemini first (its stronger model; the whole collection fits); else Cloudflare with shorter sources.
+  async function askNow(question,replaceId=''){
+    question=String(question||'').trim();if(!question||asking)return false;
+    const recs=scopeRecords(),scope=activeCollection||'';
+    if(!recs.length){askSay('There is nothing in this collection yet.');return false;}
+    asking=true;$('#askButton').disabled=true;$('#askPanel').open=true;
+    let out=null;
+    try{
+      if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
+      if(aiConfig.gemini){
+        const src=C.askSources(recs,{budget:400000});
+        const body=JSON.stringify(C.askRequest(C.askPrompt(question,{scope,sources:src.text,count:src.count,left:src.left})));
+        for(let tries=0;tries<3&&!out;tries++){
+          askSay(`Reading ${plural(src.count,'item','items')} with Gemini…`);
+          const res=await geminiPost(body,'ask');
+          if(res.status==='ok'&&res.text){out={text:res.text,model:res.model,ids:src.ids,count:src.count};break;}
+          if(res.stopRun){askSay(res.message);return false;}
+          if(res.reason==='GEMINI_BUSY'){const wait=Math.min(60,Math.max(2,res.retryAfter||20));askSay(`Gemini asked to wait ${wait} seconds…`);await new Promise(ok=>setTimeout(ok,wait*1000));continue;}
+          break;
+        }
+      }
+      if(!out&&aiConfig.cloudflare){
+        const src=C.askSources(recs,{budget:60000});
+        askSay(`Reading ${plural(src.count,'item','items')} with Cloudflare's AI…`);
+        let res;
+        try{const r=await fetch('/api/ask',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+          body:JSON.stringify({prompt:C.askPrompt(question,{scope,sources:src.text,count:src.count,left:src.left})})});res=await r.json().catch(()=>({}));
+          if(r.status===401)res={status:'failed',error:'Your sign-in expired. Sign in again, then ask again.'};}
+        catch(_){res={status:'failed',error:'connection problem'};}
+        if(res.status==='ok'&&res.text)out={text:res.text,model:res.model,ids:src.ids,count:src.count};
+        else{askSay(res.reason==='AI_DAILY_LIMIT'?allowanceMessage(true):`That did not work: ${res.error||res.detail||res.message||res.reason||'no answer'}`);return false;}
+      }
+      if(!out){askSay('No AI is set up to answer (see the README: Gemini or Cloudflare).');return false;}
+      const entry={id:'ask-'+Date.now().toString(36),scope,q:question,a:out.text,ids:out.ids,at:new Date().toISOString(),model:out.model||'',count:out.count};
+      state.questions=C.cleanQuestions([entry,...(state.questions||[]).filter(q=>q.id!==replaceId)]);
+      askSay('');commit();return true;
+    }finally{asking=false;$('#askButton').disabled=false;}
+  }
   function renderLibrary() {
-    renderStats(); renderCollections();
+    renderStats(); renderCollections(); renderAsk();
     const q=$('#search').value.toLocaleLowerCase().trim();
     const category=$('#categoryFilter').value, status=$('#statusFilter').value, analysis=$('#analysisFilter').value;
     let records=state.records.filter(r=>(!activeCollection || (r.collections||[]).includes(activeCollection))
       && (category==='all'||r.category===category)
       && (status==='all'||(status==='auto'?r.autoReviewed===true:r.status===status))
       && (analysis==='all'||C.analysisState(r)===analysis)
-      && (!q || [r.title,r.url,r.creator,r.caption,r.notes,r.category,r.place,r.city,r.country,(r.collections||[]).join(' '),(r.tags||[]).join(' '),r.auto?.transcript,r.auto?.onScreen,r.auto?.summary].join(' ').toLocaleLowerCase().includes(q)));
+      && (!q || [r.title,r.url,r.creator,r.caption,r.notes,r.body,(r.places||[]).map(p=>p.name+' '+(p.note||'')).join(' '),r.category,r.place,r.city,r.country,(r.collections||[]).join(' '),(r.tags||[]).join(' '),r.auto?.transcript,r.auto?.onScreen,r.auto?.summary].join(' ').toLocaleLowerCase().includes(q)));
     const sort=$('#sortFilter').value;
     records.sort((a,b) => sort==='title'?(a.title||a.place||'').localeCompare(b.title||b.place||''):
       sort==='oldest'?(a.savedAt||a.createdAt).localeCompare(b.savedAt||b.createdAt):(b.savedAt||b.createdAt).localeCompare(a.savedAt||a.createdAt));
     shownIds=records.map(r=>r.id);
     renderBulkBar();
-    $('#filteredCount').textContent=records.length+' '+(records.length===1?'clip':'clips');
+    $('#filteredCount').textContent=records.every(C.isClip)?records.length+' '+(records.length===1?'clip':'clips'):plural(records.length,'item','items');
     $('#libraryEmpty').hidden=records.length!==0;
     $('#clipGrid').innerHTML=records.map(r=>{
-      const title=r.title||r.place||'Untitled saved TikTok';
+      const clip=C.isClip(r),host=r.kind==='link'?hostOf(r.url):'';
+      const title=r.title||r.place||(clip?'Untitled saved TikTok':host||'Untitled note');
       const loc=[r.place,r.city,r.country].filter(Boolean).join(' · ');
       const chips=[...(r.collections||[]).slice(0,2),...(r.tags||[]).slice(0,1)];
       const inPlan=state.plan.some(p=>p.recordId===r.id);
-      return `<article class="clip-card${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags"><span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||[r.auto.reason,r.auto.detail].filter(Boolean).join(': '))}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html(loc||'Location not yet identified')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${r.notes||r.caption?`<p class="clip-notes">${html(r.notes||r.caption)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions"><button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a><button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete clip">✕</button></div></article>`;
+      const places=r.places||[];
+      const placeLine=places.length>1?`<p class="clip-places" title="${html(places.map(p=>p.name).join(', '))}">📍 ${places.length} places: ${html(places.slice(0,3).map(p=>p.name).join(' · '))}${places.length>3?' +'+(places.length-3):''}</p>`:'';
+      // A TikTok shows whether it is reviewed; a web page or note shows what it is, and whether the AI has read it.
+      const flags=clip?`<span class="status ${r.status==='reviewed'?'reviewed':''}">${r.status==='reviewed'?'✓ Reviewed':'Needs review'}</span>${r.auto?`<span class="analysis-badge auto-${html(r.auto.status)}" title="${html(r.auto.summary||[r.auto.reason,r.auto.detail].filter(Boolean).join(': '))}">✦ ${html(r.autoReviewed?'Auto-reviewed':C.AUTO_LABELS[r.auto.status]||'')}</span>`:C.analysisState(r)==='not_analyzed'?'':`<span class="analysis-badge ${html(C.analysisState(r))}" title="${html(r.enrichment?.reason||'')}">${html(C.ANALYSIS_LABELS[C.analysisState(r)])}</span>`}`
+        :`<span class="kind-badge">${r.kind==='link'?'🔗 WEB PAGE':'📝 NOTE'}</span>${reading.has(r.id)?'<span class="analysis-badge">✦ Reading…</span>':r.auto?.status==='understood'?`<span class="analysis-badge auto-understood" title="${html(r.auto.summary||'')}">✦ Read</span>`:''}`;
+      const about=clip?(r.notes||r.caption):(r.notes||String(r.body||'').replace(/\s+/g,' ').slice(0,220));
+      const actions=clip?`<button data-action="watch" data-id="${html(r.id)}" title="Watch it here and fill in its details">▶ Watch</button><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok">↗ TikTok</a>`
+        :`${r.kind==='link'?`<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open the page">↗ Open</a>`:''}<button data-action="read-item" data-id="${html(r.id)}" title="Let the AI read it again and list the places in it"${reading.has(r.id)?' disabled':''}>✦ Read</button>`;
+      return `<article class="clip-card${clip?'':' kind-'+html(r.kind)}${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags">${flags}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html([host,loc||(clip?'Location not yet identified':'')].filter(Boolean).join(' · ')||'No place yet')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${placeLine}${about?`<p class="clip-notes">${html(about)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions">${actions}<button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete ${clip?'clip':r.kind==='link'?'web page':'note'}">✕</button></div></article>`;
     }).join('');
   }
   // The Itinerary page has three views: an overview of what the clips add up to (with
@@ -156,6 +226,12 @@
   let itineraryView=null;
   // The overview's choices: which country, which categories go on days, and each city's days in trip order.
   let trip=null;
+  // Where a stop came from: its TikTok, its web page, or (no link) the note it is in.
+  function sourceLink(r,isPlace){
+    const what=C.isClip(r)?'TikTok':r.kind==='link'?'page':'note';
+    if(!r.url)return `<span class="stop-from">From your note “${html(r.title||'untitled')}”</span>`;
+    return `<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">${isPlace?'From “'+html(r.title||(what==='TikTok'?'a saved TikTok':hostOf(r.url)))+'” ↗':what==='TikTok'?'View original TikTok ↗':'Open the page ↗'}</a>`;
+  }
   const dayCitiesOf=day=>(state.dayCities&&state.dayCities[day])||[];
   const dayLabel=day=>{const c=dayCitiesOf(day);return `Day ${day}${c.length?' · '+c.join(', '):''}`;};
   function renderItinerary() {
@@ -168,12 +244,12 @@
     if(itineraryView==='cities')renderCityBoard();else if(itineraryView==='overview')renderOverview();else renderDays();
   }
   const plural=(n,one,many)=>`${n} ${n===1?one:many}`;
-  const shortCategory=name=>String(name).includes(' · ')?String(name).split(' · ').slice(1).join(' · '):name;
+  const kindLabel=t=>`${C.PLACE_EMOJI[t]} ${C.PLACE_LABELS[t]}`;
   // The cities of the overview with their days: as the person set them, else the days' cities, else a suggestion.
   function tripState(){
     const countries=C.tripCountries(state.records);
     if(!trip||(trip.country&&!countries.some(c=>c.country===trip.country)))trip={country:countries[0]?.country||'',include:null,cities:null,edited:false};
-    const o=C.tripOverview(state.records,categoryList(),trip.country),key=v=>String(v).toLowerCase();
+    const o=C.tripOverview(state.records,trip.country),key=v=>String(v).toLowerCase();
     const known=new Map(o.cities.map(c=>[key(c.name),c]));
     if(!trip.cities||(!trip.edited&&trip.forDays!==state.dayCount)){
       const fromDays=[];
@@ -189,50 +265,57 @@
     for(const c of o.cities)if(!trip.cities.some(t=>key(t.name)===key(c.name)))trip.cities.push({name:c.name,days:0});
     return {countries,o};
   }
-  // What the saved clips of a country add up to, and how many days each city gets.
+  // What the saved places of a country add up to, and how many days each city gets.
   function renderOverview(){
     const box=$('#itineraryOverview');
     if(!state.records.length){box.innerHTML='<div class="day-empty">No saved clips yet. Import some, and this shows what they add up to.</div>';return;}
     const {countries,o}=tripState(),byName=new Map(o.cities.map(c=>[c.name.toLowerCase(),c]));
     const include=trip.include?new Set(trip.include):null,total=trip.cities.reduce((n,c)=>n+c.days,0);
-    let s=`<div class="overview-head"><label class="field small"><span>CLIPS FROM</span><select id="tripCountry">${countries.map(c=>`<option value="${html(c.country)}"${c.country===trip.country?' selected':''}>${html(c.country)} (${c.count})</option>`).join('')}<option value=""${trip.country===''?' selected':''}>Everywhere (${state.records.length})</option></select></label>`+
-      `<div class="overview-sum"><strong>${plural(o.total,'clip','clips')} in ${plural(o.cities.length,'city','cities')}</strong><span>${o.categories.map(c=>`${html(emojiFor(c.category))} ${c.count} ${html(shortCategory(c.category))}`).join(' · ')}</span></div></div>`;
-    if(o.noCity)s+=`<p class="overview-note">${plural(o.noCity,'clip has','clips have')} no city yet, so ${o.noCity===1?'it is':'they are'} not in a city below. <button type="button" class="link-inline" data-action="show-city" data-city="">See ${o.noCity===1?'it':'them'}</button> Auto-review fills in cities, or type one in Edit.</p>`;
-    if(!o.cities.length){box.innerHTML=s+'<div class="day-empty">None of these clips has a city yet. Run auto-review (or fill in cities in Edit), and the cities show here.</div>';return;}
-    s+=`<div class="overview-include"><span>PUT ON DAYS</span>${o.categories.map(c=>`<label class="toggle-chip"><input type="checkbox" data-trip-include="${html(c.category)}"${!include||include.has(c.category)?' checked':''} /> ${html(emojiFor(c.category))} ${html(shortCategory(c.category))}</label>`).join('')}</div><ol class="trip-cities">`;
+    const everywhere=C.tripOverview(state.records,'').total;
+    let s=`<div class="overview-head"><label class="field small"><span>PLACES FROM</span><select id="tripCountry">${countries.map(c=>`<option value="${html(c.country)}"${c.country===trip.country?' selected':''}>${html(c.country)} (${c.count})</option>`).join('')}<option value=""${trip.country===''?' selected':''}>Everywhere (${everywhere})</option></select></label>`+
+      `<div class="overview-sum"><strong>${plural(o.total,'place','places')} in ${plural(o.cities.length,'city','cities')}</strong><span>from ${plural(o.clips,'clip','clips')} · ${o.types.map(t=>`${kindLabel(t.type)} ${t.count}`).join(' · ')}</span></div></div>`;
+    if(o.noCity)s+=`<p class="overview-note">${plural(o.noCity,'place has','places have')} no city yet, so ${o.noCity===1?'it is':'they are'} not in a city below. <button type="button" class="link-inline" data-action="show-city" data-city="">See ${o.noCity===1?'it':'them'}</button> Auto-review fills in cities, or type one in Edit.</p>`;
+    if(!o.cities.length){box.innerHTML=s+'<div class="day-empty">None of these places has a city yet. Run auto-review (or fill in cities in Edit), and the cities show here.</div>';return;}
+    s+=`<div class="overview-include"><span>PUT ON DAYS</span>${o.types.map(t=>`<label class="toggle-chip"><input type="checkbox" data-trip-include="${t.type}"${!include||include.has(t.type)?' checked':''} /> ${kindLabel(t.type)}</label>`).join('')}</div><ol class="trip-cities">`;
     trip.cities.forEach((t,i)=>{
       const c=byName.get(t.name.toLowerCase());if(!c)return;
-      const cats=c.categories.map(g=>`<span title="${html(g.category)}">${html(emojiFor(g.category))} ${g.count} ${html(shortCategory(g.category))}</span>`).join('');
+      const cats=c.types.map(g=>`<span>${kindLabel(g.type)} ${g.count}</span>`).join('');
       const places=c.places.slice(0,8).map(p=>`<span class="chip">${html(p)}</span>`).join('')+(c.places.length>8?`<span class="chip more">+${c.places.length-8} more</span>`:'');
-      s+=`<li class="trip-city${t.days?'':' no-days'}"><div class="trip-city-main"><h3>📍 ${html(c.name)} <small>${plural(c.count,'clip','clips')}${c.places.length?' · '+plural(c.places.length,'named place','named places'):''}</small></h3><p class="trip-cats">${cats}</p>${places?`<div class="chips trip-places">${places}</div>`:''}</div>`+
+      s+=`<li class="trip-city${t.days?'':' no-days'}"><div class="trip-city-main"><h3>📍 ${html(c.name)} <small>${plural(c.count,'place','places')}</small></h3><p class="trip-cats">${cats}</p>${places?`<div class="chips trip-places">${places}</div>`:''}</div>`+
         `<div class="trip-city-days"><label><span>DAYS</span><input type="number" min="0" max="30" step="1" inputmode="numeric" value="${t.days}" data-trip-days="${html(c.name)}" aria-label="Days in ${html(c.name)}" /></label><div class="trip-move"><button type="button" data-action="trip-move" data-city="${html(c.name)}" data-step="-1"${i===0?' disabled':''} aria-label="${html(c.name)} earlier in the trip">↑</button><button type="button" data-action="trip-move" data-city="${html(c.name)}" data-step="1"${i===trip.cities.length-1?' disabled':''} aria-label="${html(c.name)} later in the trip">↓</button></div></div></li>`;
     });
     const route=trip.cities.filter(t=>t.days>0).map(t=>`${html(t.name)} ${t.days}`).join(' → ');
     const fit=total>state.dayCount?`The trip becomes ${total} days.`:total<state.dayCount?`${plural(state.dayCount-total,'day stays','days stay')} free (of ${state.dayCount}).`:`All ${state.dayCount} days have a city.`;
-    s+=`</ol><div class="overview-foot"><div><strong>${plural(total,'day','days')}</strong>${route?' · '+route:''}<small>${fit}${trip.from==='suggested'&&!trip.edited?' Suggested from how many clips each city has; change the days or the order.':''}</small></div>`+
+    s+=`</ol><div class="overview-foot"><div><strong>${plural(total,'day','days')}</strong>${route?' · '+route:''}<small>${fit}${trip.from==='suggested'&&!trip.edited?' Suggested from how many places each city has; change the days or the order.':''}</small></div>`+
       `<div class="overview-actions"><button type="button" class="btn-light" data-action="trip-suggest">Suggest again</button><button type="button" class="btn-primary" data-action="trip-fill"${total?'':' disabled'}>Fill the days</button></div></div>`+
-      '<p class="hint">Fill the days puts each city on its days, in this order, and spreads its clips over them: a mix of categories, named places first, at most 8 stops a day. It replaces the days you have now (you can undo it), and then you can change anything in Days and By city.</p>';
+      '<p class="hint">Fill the days puts each city on its days, in this order, and spreads its places over them: a mix of food, shopping, sightseeing and activities, named places first, at most 8 stops a day. A TikTok with several places has each one on its own, and each links back to it. It replaces the days you have now (you can undo it), and then you can change anything in Days and By city.</p>';
     box.innerHTML=s;
   }
   function fillDays(){
     tripState();
-    const recs=C.tripRecords(state.records,trip.country).sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
-    const res=C.autoFill(recs,categoryList(),trip.cities,{include:trip.include});
+    const recs=[...state.records].sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
+    const res=C.autoFill(C.tripItemsIn(recs,trip.country),trip.cities,{include:trip.include});
     if(!res.days){toast('Give at least one city a day first.');return;}
     const had=state.plan.length,hadCities=Object.keys(state.dayCities||{}).length;
     if((had||hadCities)&&!confirm(`Fill the days? This replaces your current days (${plural(had,'stop','stops')}${hadCities?', and the cities set for '+plural(hadCities,'day','days'):''}). You can undo it right after.`))return;
     const before={plan:state.plan,dayCities:state.dayCities,dayCount:state.dayCount};
     const days=C.cleanDayCount(Math.max(state.dayCount,res.days)),stamp=Date.now().toString(36);
     state.dayCount=days;state.dayCities=C.cleanDayCities(res.dayCities,days);
-    state.plan=res.stops.map((x,i)=>({id:`stop-${stamp}-${i}`,recordId:x.recordId,day:x.day,note:''}));
+    state.plan=res.stops.map((x,i)=>({id:`stop-${stamp}-${i}`,recordId:x.recordId,...(x.placeId?{placeId:x.placeId}:{}),day:x.day,note:''}));
     trip.edited=false;trip.cities=null;itineraryView='days';commit();
     const extra=Object.values(res.left).reduce((a,b)=>a+b,0);
-    toast(`Filled ${plural(res.days,'day','days')} with ${plural(res.stops.length,'stop','stops')}.${extra?` ${plural(extra,'more clip','more clips')} did not fit (at most 8 a day) and ${extra===1?'is':'are'} still in By city.`:''}`,
+    toast(`Filled ${plural(res.days,'day','days')} with ${plural(res.stops.length,'stop','stops')}.${extra?` ${plural(extra,'more place','more places')} did not fit (at most 8 a day) and ${extra===1?'is':'are'} still in By city.`:''}`,
       {label:'Undo',run:()=>{state.plan=before.plan;state.dayCities=before.dayCities;state.dayCount=before.dayCount;trip.cities=null;commit();toast('Your days are back as they were.');}});
+  }
+  // What one stop is: a place of a clip, or a whole clip.
+  function stopItem(entry,r){
+    const place=entry.placeId?(r.places||[]).find(p=>p.id===entry.placeId):null;
+    if(place)return {name:place.name,type:C.placeType(place.type),city:place.city||r.city||'',country:place.country||r.country||'',note:place.note||'',place:true};
+    return {name:r.title||r.place||'Saved TikTok',type:'',city:r.city||'',country:r.country||'',note:'',place:false};
   }
   function renderDays() {
     const days=$('#itineraryDays'); const byId=new Map(state.records.map(r=>[r.id,r]));
-    const planned=new Set(state.plan.map(p=>p.recordId));
+    const dayOf=C.planDays(state.plan),allItems=C.tripItems(state.records);
     const choices=day=>Array.from({length:state.dayCount},(_,i)=>`<option value="${i+1}" ${day===i+1?'selected':''}>${html(dayLabel(i+1))}</option>`).join('');
     let s='';
     for(let day=1;day<=state.dayCount;day++){
@@ -240,22 +323,24 @@
       const chips=cities.map(c=>`<span class="city-chip">${html(c)}<button type="button" data-action="day-city-remove" data-day="${day}" data-city="${html(c)}" aria-label="Take ${html(c)} off day ${day}">✕</button></span>`).join('');
       s+=`<section class="day-panel"><div class="day-head"><span class="day-num">${String(day).padStart(2,'0')}</span><div class="day-title"><h3>Day ${day}</h3><div class="day-cities">${chips}${cities.length<6?`<input list="cityOptions" data-day-city="${day}" placeholder="${cities.length?'+ another city':'+ city for this day'}" aria-label="Add a city to day ${day} (type or pick, then Enter)" autocomplete="off" />`:''}</div></div><small>${items.length} ${items.length===1?'stop':'stops'}</small></div>`;
       // What is still waiting in this day's cities.
-      const waiting=cities.map(c=>[c,state.records.filter(r=>r.city&&r.city.trim().toLowerCase()===c.toLowerCase()&&!planned.has(r.id)).length]).filter(([,n])=>n);
+      const waiting=cities.map(c=>[c,allItems.filter(it=>it.city&&it.city.toLowerCase()===c.toLowerCase()&&!dayOf(it)).length]).filter(([,n])=>n);
       if(waiting.length)s+=`<p class="day-more">${waiting.map(([c,n])=>`${n} saved in ${html(c)} not planned yet <button type="button" class="link-inline" data-action="show-city" data-city="${html(c)}">Show them</button>`).join(' · ')}</p>`;
       if(!items.length)s+=`<div class="day-empty">${cities.length?'Pick stops for this day in <strong>By city</strong>, or':'Add stops from Discoveries with'} the “+ Plan” button${cities.length?' in Discoveries':''}.</div>`;
       for(let j=0;j<items.length;j++){
-        const entry=items[j],r=byId.get(entry.recordId);
-        const away=cities.length&&r.city&&r.city.trim()&&!cities.some(c=>c.toLowerCase()===r.city.trim().toLowerCase());
-        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(r.title||r.place||'Saved TikTok')}</h4><p>${html([r.place,r.city,r.country].filter(Boolean).join(' · ')||r.category)}${away?` <span class="stop-away">not in ${html(cities.join(' or '))}</span>`:''}</p><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">View original TikTok ↗</a><input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices(day)}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
+        const entry=items[j],r=byId.get(entry.recordId),it=stopItem(entry,r);
+        const away=cities.length&&it.city.trim()&&!cities.some(c=>c.toLowerCase()===it.city.trim().toLowerCase());
+        const where=it.place?[kindLabel(it.type),it.city,it.note].filter(Boolean).join(' · '):[r.place,r.city,r.country].filter(Boolean).join(' · ')||r.category;
+        const whole=!it.place&&(r.places||[]).length>1?`<p class="stop-places">📍 ${html(r.places.map(p=>p.name).join(' · '))} <button type="button" class="link-inline" data-action="split-stop" data-id="${html(r.id)}">Give each place its own stop</button></p>`:'';
+        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(it.name)}</h4><p>${html(where)}${away?` <span class="stop-away">not in ${html(cities.join(' or '))}</span>`:''}</p>${whole}${sourceLink(r,!!it.place)}<input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices(day)}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
       }
       s+='</section>';
     }
     days.innerHTML=s;
   }
-  // Every saved clip, by city, then by category: food, activities, shops… with a day picker on each.
+  // Every saved place, by city, then by kind (food, shopping, sightseeing, activities, stay), with a day picker on each.
   function renderCityBoard() {
     const recs=[...state.records].sort((a,b)=>String(b.savedAt||b.createdAt||'').localeCompare(String(a.savedAt||a.createdAt||'')));
-    const board=C.cityBoard(recs,categoryList(),state.plan),box=$('#itineraryCities');
+    const board=C.cityBoard(recs,state.plan),box=$('#itineraryCities');
     if(!board.length){box.innerHTML='<div class="day-empty">No saved clips yet. Import some, and they show here by city.</div>';return;}
     const options=day=>`<option value="0"${day?'':' selected'}>Not planned</option>`+Array.from({length:state.dayCount},(_,i)=>`<option value="${i+1}"${day===i+1?' selected':''}>${html(dayLabel(i+1))}</option>`).join('');
     const named=board.filter(c=>c.name);
@@ -263,13 +348,13 @@
     for(const c of board){
       const days=c.name?Object.keys(state.dayCities||{}).map(Number).filter(d=>d<=state.dayCount&&dayCitiesOf(d).some(x=>x.toLowerCase()===c.name.toLowerCase())):[];
       s+=`<details class="city-panel${c.name?'':' city-unknown'}" data-city-key="${html(c.name.toLowerCase())}"${c.name?' open':''}><summary><span class="city-name">${c.name?'📍 '+html(c.name):'City not known yet'}</span><small>${html([c.country,`${c.count} saved`,`${c.planned} planned`,days.length?'Day '+days.join(', '):''].filter(Boolean).join(' · '))}</small></summary>`;
-      if(!c.name)s+='<p class="hint city-note">Fill in a clip\'s city in Edit or Review mode (or let auto-review find it) and it moves into its city.</p>';
+      if(!c.name)s+='<p class="hint city-note">Fill in a city in Edit or Review mode (or let auto-review find it) and it moves into its city.</p>';
       s+='<div class="city-groups">';
       for(const g of c.groups){
-        s+=`<div class="city-group"><h4>${html(emojiFor(g.category))} ${html(g.category)} <small>${g.items.length}</small></h4><ul>`;
-        for(const {record:r,day} of g.items){
-          const where=[r.place&&r.place!==r.title?r.place:'',r.status!=='reviewed'?'needs review':''].filter(Boolean).join(' · ');
-          s+=`<li class="city-item${day?' planned':''}"><div class="city-item-text"><strong>${html(r.title||r.place||'Saved TikTok')}</strong>${where?`<span>${html(where)}</span>`:''}</div><div class="city-item-actions"><a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="Open on TikTok" aria-label="Open on TikTok">↗</a><select data-city-plan="${html(r.id)}" aria-label="Plan ${html(r.title||'this clip')} on a day">${options(day)}</select></div></li>`;
+        s+=`<div class="city-group"><h4>${kindLabel(g.type)} <small>${g.items.length}</small></h4><ul>`;
+        for(const {item:it,day} of g.items){
+          const r=it.record,where=[it.note,it.placeId?'from “'+(r.title||'a saved TikTok')+'”':r.status!=='reviewed'?'needs review':''].filter(Boolean).join(' · ');
+          s+=`<li class="city-item${day?' planned':''}"><div class="city-item-text"><strong>${html(it.name)}</strong>${where?`<span>${html(where)}</span>`:''}</div><div class="city-item-actions">${r.url?`<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}" aria-label="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}">↗</a>`:`<span class="from-note" title="From your note “${html(r.title||'')}”">📝</span>`}<select data-city-plan="${html(it.key)}" aria-label="Plan ${html(it.name)} on a day">${options(day)}</select></div></li>`;
         }
         s+='</ul></div>';
       }
@@ -282,11 +367,16 @@
     const panel=[...$$('#itineraryCities .city-panel')].find(p=>p.dataset.cityKey===String(name).toLowerCase());
     if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}
   }
-  // Plan a clip on a day from By city (0 takes it off the itinerary). A moved stop goes to the end of its new day.
-  function planOnDay(recordId,day){
-    const at=state.plan.findIndex(p=>p.recordId===recordId);
+  const stopId=()=>'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+  // Plan a place (or a clip with none listed) on a day from By city; 0 takes it off. A moved stop
+  // goes to the end of its new day. A whole-clip stop is first split into one stop per place.
+  function planOnDay(key,day){
+    const [recordId,placeId=''] =String(key).split('#');
+    const r=state.records.find(x=>x.id===recordId);if(!r)return;
+    if(placeId)state.plan=C.splitClipStop(state.plan,r,stopId);
+    const at=state.plan.findIndex(p=>p.recordId===recordId&&(p.placeId||'')===placeId);
     if(!day){if(at>=0)state.plan.splice(at,1);commit();return;}
-    const entry=at>=0?state.plan.splice(at,1)[0]:{id:'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),recordId,note:''};
+    const entry=at>=0?state.plan.splice(at,1)[0]:{id:stopId(),recordId,...(placeId?{placeId}:{}),note:''};
     entry.day=day;state.plan.push(entry);commit();
   }
   function addDayCity(day,name){
@@ -299,44 +389,184 @@
     renderStats(); renderCollections(); renderAnalysisSummary(); renderReviewCount();
     if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); else if(currentTab==='settings')renderSettings();
   }
-  function openEditor(id=null) {
+  // What the Edit dialog holds: a TikTok, a web page (its link and text) or a typed note.
+  let editingKind='tiktok',editorReadAt='';
+  const KIND_TITLES={tiktok:'discovery',link:'web link',note:'note'};
+  function setKind(kind,isNew){
+    editingKind=C.ITEM_KINDS.includes(kind)?kind:'tiktok';
+    const form=$('#editForm'),url=form.elements.namedItem('url'),body=form.elements.namedItem('body');
+    $('#kindPick').hidden=!isNew;
+    for(const b of $$('#kindPick [data-kind]'))b.setAttribute('aria-pressed',String(b.dataset.kind===editingKind));
+    $('#modalTitle').textContent=(isNew?'New ':'Edit ')+KIND_TITLES[editingKind];
+    $('#editDialog .modal-heading .eyebrow').textContent=editingKind==='tiktok'?'CLIP DETAILS':editingKind==='link'?'WEB PAGE':'NOTE';
+    $('#urlField').hidden=editingKind==='note';url.required=editingKind!=='note';
+    $('#urlLabel').textContent=editingKind==='link'?'WEB LINK *':'TIKTOK LINK *';
+    url.placeholder=editingKind==='link'?'https://… (a guide, a blog post, a Reddit thread)':'https://www.tiktok.com/@…/video/…';
+    $('#bodyField').hidden=editingKind==='tiktok';
+    $('#bodyLabel').textContent=editingKind==='note'?'NOTE *':'PAGE TEXT';
+    body.placeholder=editingKind==='note'?'Type anything: a friend’s recommendations, a list from a guide, opening hours, a booking tip…'
+      :'Press “Read the page”, or paste the page’s text here (some sites, like Reddit, do not let ClipAtlas read them).';
+    $('#readPageBtn').hidden=editingKind!=='link';
+    for(const el of $$('#editForm .tiktok-only'))el.hidden=editingKind!=='tiktok';
+    $('#placesLabel').textContent=editingKind==='tiktok'?'PLACES IN THIS CLIP':editingKind==='link'?'PLACES ON THIS PAGE':'PLACES IN THIS NOTE';
+    if(editingKind!=='tiktok')$('#editHeard').hidden=true;
+  }
+  function openEditor(id=null,kind='tiktok') {
     editingId=id; const r=state.records.find(x=>x.id===id);
-    $('#modalTitle').textContent=r?'Edit discovery':'New discovery'; $('#modalError').textContent='';
+    $('#modalError').textContent='';$('#readPageStatus').textContent='';editorReadAt='';
     const form=$('#editForm'); form.reset();
-    if(r) for(const key of ['url','title','creator','caption','notes','category','place','city','country','status']) {
+    if(r) for(const key of ['url','title','creator','caption','notes','category','place','city','country','status','body']) {
       const el=form.elements.namedItem(key); if(el) el.value=r[key]||'';
     }
     if(r){form.elements.namedItem('collections').value=(r.collections||[]).join(', ');form.elements.namedItem('tags').value=(r.tags||[]).join(', ');}
+    // Something new added while a collection is open goes into that collection.
+    else if(activeCollection)form.elements.namedItem('collections').value=activeCollection;
+    $('#editPlaces').replaceChildren(...(r?.places||[]).map(placeRow));
     const said=r?.auto?.transcript||'';
     $('#editHeard').hidden=!r?.auto;
     $('#editTranscript').textContent=said||(r?.auto?'No speech was heard (music only, or nothing said).':'');
     $('#copyEditTranscript').hidden=!said;
+    setKind(r?(r.kind||'tiktok'):kind,!r);
     $('#editDialog').showModal();
   }
+  // One place in the Edit dialog: name, kind, city, note.
+  function placeRow(p={}){
+    const row=document.createElement('div');row.className='place-row';row.dataset.placeId=p.id||'';
+    row.innerHTML=`<input class="pl-name" placeholder="Place name" aria-label="Place name" maxlength="100" /><select class="pl-type" aria-label="Kind of place">${C.PLACE_TYPES.map(t=>`<option value="${t}">${C.PLACE_EMOJI[t]} ${C.PLACE_LABELS[t]}</option>`).join('')}</select><input class="pl-city" placeholder="City" aria-label="City" maxlength="60" /><input class="pl-note" placeholder="What to get or do there" aria-label="Note" maxlength="200" /><button type="button" class="pl-remove icon-only" aria-label="Remove this place">✕</button>`;
+    row.querySelector('.pl-name').value=p.name||'';row.querySelector('.pl-type').value=C.placeType(p.type||'sightseeing');
+    row.querySelector('.pl-city').value=p.city||'';row.querySelector('.pl-note').value=p.note||'';
+    return row;
+  }
+  function editorPlaces(){
+    return [...$$('#editPlaces .place-row')].map(row=>({id:row.dataset.placeId||undefined,name:row.querySelector('.pl-name').value,
+      type:row.querySelector('.pl-type').value,city:row.querySelector('.pl-city').value,note:row.querySelector('.pl-note').value}));
+  }
+  const LIBRARY_FULL=1_850_000;   // the library is saved as one file of at most 2 MB
   function editorSave(evt) {
     evt.preventDefault();
-    const form=evt.target;
+    const form=evt.target, err=t=>{$('#modalError').textContent=t;};
     const source=Object.fromEntries(new FormData(form).entries());
-    const parsed=C.parseTikTokURL(source.url);
-    if(!parsed){$('#modalError').textContent='Enter a valid TikTok URL (including a share link).';return;}
-    const duplicate=state.records.find(r=>r.key===parsed.key&&r.id!==editingId);
-    if(duplicate){$('#modalError').textContent='This video is already saved. Edit its existing card instead.';return;}
     const old=state.records.find(r=>r.id===editingId);
-    const created=C.createRecord({...source,id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt});
-    if(!created){$('#modalError').textContent='Invalid TikTok URL.';return;}
+    let kind=old?(old.kind||'tiktok'):editingKind;
+    // A TikTok pasted as a web link (or a web page pasted as a TikTok) is saved as what it is.
+    if(!old&&kind==='link'&&C.parseTikTokURL(source.url))kind='tiktok';
+    else if(!old&&kind==='tiktok'&&!C.parseTikTokURL(source.url)&&C.webLink(source.url))kind='link';
+    let key='';
+    if(kind==='tiktok'){const parsed=C.parseTikTokURL(source.url);if(!parsed){err('Enter a valid TikTok URL (including a share link).');return;}key=parsed.key;}
+    else if(kind==='link'){const w=C.webLink(source.url);if(!w){err(C.parseTikTokURL(source.url)?'That is a TikTok link: save it as a TikTok.':'Enter a web link (https://…).');return;}key=w.key;}
+    else if(!String(source.body||'').trim()&&!String(source.title||'').trim()){err('Type the note (or at least a title).');return;}
+    const duplicate=key&&state.records.find(r=>r.key===key&&r.id!==editingId);
+    if(duplicate){err(kind==='tiktok'?'This video is already saved. Edit its existing card instead.':'This page is already saved. Edit its existing card instead.');return;}
+    // The places as the dialog has them; if they differ from what auto-review found, they are the person's now.
+    const places=C.cleanPlaces(editorPlaces(),old?.places||[]);
+    const same=(a,b)=>JSON.stringify((a||[]).map(p=>[p.name,p.type,p.city,p.note]))===JSON.stringify((b||[]).map(p=>[p.name,p.type,p.city,p.note]));
+    const placesBy=same(places,old?.places)?old?.placesBy:(places.length?'person':undefined);
+    // A web page or note is the person's own: it needs no review.
+    const created=C.createRecord({...source,kind,status:kind==='tiktok'?source.status:'reviewed',id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt,
+      readAt:editorReadAt||old?.readAt,places,placesBy});
+    if(!created){err(kind==='tiktok'?'Invalid TikTok URL.':'That could not be saved.');return;}
     if(old&&old.key===created.key){created.enrichment=old.enrichment;created.enrichedAt=old.enrichedAt;created.enrichmentStatus=old.enrichmentStatus;}
     if(old)created.auto=old.auto;  // what auto-review heard and saw; the person has checked it now
     if(old&&old.category===created.category)created.autoSorted=old.autoSorted;
-    if(old)state.records[state.records.indexOf(old)]={...created,id:old.id};else state.records.push(created);
-    $('#editDialog').close();commit();toast(old?'Discovery updated':'New discovery saved');
+    const saved=old?{...created,id:old.id}:created;
+    if(saved.body&&saved.body!==old?.body&&JSON.stringify(state).length+saved.body.length>LIBRARY_FULL){
+      saved.body=saved.body.slice(0,3000);toast('Your library is nearly full (2 MB), so only the first 3,000 characters of the text were kept.');}
+    if(old)state.records[state.records.indexOf(old)]=saved;else state.records.push(saved);
+    state.plan=C.prunePlan(state.plan,state.records);
+    $('#editDialog').close();commit();
+    // A new or changed web page or note is read by the AI for its places (a new link with no text: the page is read first).
+    const changed=!old||old.body!==saved.body||old.url!==saved.url;
+    if(kind!=='tiktok'&&changed&&(saved.body||kind==='link'))readItem(saved.id);
+    else toast(old?'Saved':'New '+KIND_TITLES[kind]+' saved');
+  }
+  // Ask the Worker for a web page's text (src/readpage.js).
+  const PAGE_WHY={BLOCKED:'The site would not let ClipAtlas read it (Reddit and some others refuse).',NOT_FOUND:'The page could not be opened.',
+    NO_TEXT:'The page has no text ClipAtlas can read (it may need JavaScript to show it).',NOT_A_PAGE:'That link is not a web page.',
+    TOO_BIG:'The page is too large to read.',TIMEOUT:'The site took too long to answer.',BAD_LINK:'That is not a web link.',
+    TIKTOK:'That is a TikTok: save it as a TikTok.',PRIVATE:'That address cannot be read from the internet.',
+    SIGNED_OUT:'Your sign-in expired. Sign in again.',CLIPATLAS_LIMIT:'ClipAtlas has read 100 pages today, its daily limit.',NETWORK:'Connection problem.'};
+  const pageWhy=p=>PAGE_WHY[p.reason]||`It did not work (${p.reason||'no answer'}).`;
+  async function fetchPage(url){
+    try{const res=await fetch('/api/readpage',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({url})});
+      const data=await res.json().catch(()=>({}));
+      if(res.status===401)return {status:'failed',reason:'SIGNED_OUT'};
+      return data.status?data:{status:'failed',reason:'SERVER_'+res.status};
+    }catch(_){return {status:'failed',reason:'NETWORK'};}
+  }
+  const pageText=p=>String(p.text||p.description||'').slice(0,20000);
+  async function readPageIntoEditor(){
+    const form=$('#editForm'),body=form.elements.namedItem('body'),say=t=>{$('#readPageStatus').textContent=t;};
+    const w=C.webLink(form.elements.namedItem('url').value);
+    if(!w){say('Enter the web link first.');return;}
+    if(body.value.trim()&&!confirm('Replace the text in the box with the page’s text?'))return;
+    const btn=$('#readPageBtn');btn.disabled=true;say('Reading the page…');
+    try{
+      const page=await fetchPage(w.url);
+      if(page.status!=='ok'){say(pageWhy(page)+' You can paste the text into the box instead.');return;}
+      body.value=pageText(page);editorReadAt=new Date().toISOString();
+      const t=form.elements.namedItem('title');if(!t.value.trim()&&page.title)t.value=page.title.slice(0,300);
+      say(`Read ${body.value.length.toLocaleString()} characters. When you save, the AI lists the places in it.`);
+    }finally{btn.disabled=false;}
+  }
+  // The AI reads a web page or note (Gemini first, then Cloudflare) and fills in its details and places,
+  // the way auto-review does for a clip. What the person wrote is kept.
+  async function readItem(id){
+    let r=state.records.find(x=>x.id===id);if(!r||C.isClip(r)||reading.has(id))return;
+    reading.add(id);if(currentTab==='library')renderLibrary();
+    const name=()=>{const x=state.records.find(y=>y.id===id)||r;return x.title||hostOf(x.url)||'the note';};
+    try{
+      if(r.kind==='link'&&!String(r.body||'').trim()){
+        toast('Reading the page…');
+        const page=await fetchPage(r.url);
+        if(page.status!=='ok'){toast(`${pageWhy(page)} Open Edit and paste the page’s text, and it is read from that.`);return;}
+        r=state.records.find(x=>x.id===id);if(!r)return;
+        const text=pageText(page);
+        r={...r,body:JSON.stringify(state).length+text.length>LIBRARY_FULL?text.slice(0,3000):text,title:r.title||String(page.title||'').slice(0,300),readAt:new Date().toISOString()};
+        state.records[state.records.findIndex(x=>x.id===id)]=r;commit();
+      }
+      const text=[r.body,r.notes].filter(s=>String(s||'').trim()).join('\n\n');
+      if(!text.trim()){toast('There is no text to read yet.');return;}
+      if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
+      const categories=categoryList().map(c=>({name:c.name,words:c.words||[]}));
+      let res=null,why='';
+      if(aiConfig.gemini){
+        const body=JSON.stringify(C.geminiTextRequest({kind:r.kind,title:r.title,url:r.url,body:text,categories}));
+        for(let tries=0;tries<3;tries++){
+          toast(`Reading “${name()}” with Gemini…`);
+          const g=await geminiPost(body);
+          if(g.status==='ok'){res=C.readGeminiAnswer(g.text,categoryList(),{audio:false,images:0});break;}
+          if(g.stopRun){toast(g.message);return;}
+          why=g.detail||g.reason||'';
+          if(g.reason==='GEMINI_BUSY'){await new Promise(ok=>setTimeout(ok,Math.min(60,Math.max(2,g.retryAfter||20))*1000));continue;}
+          break;
+        }
+      }
+      if((!res||res.status!=='understood')&&aiConfig.cloudflare){
+        const data=await autoPost('understand',{transcript:text.slice(0,4000),images:[],categories});
+        if(data.stopRun){toast(data.message);return;}
+        res=data;why=data.detail||data.error||data.reason||why;
+      }
+      if(!res){toast(why?`Could not read it: ${why}`:'No AI is set up to read it (see the README: Gemini or Cloudflare).');return;}
+      if(res.status!=='understood'){toast(res.status==='empty'?`The AI found nothing to use in “${name()}”.`:`Could not read it: ${res.detail||res.reason||why||'no answer'}`);return;}
+      const cur=state.records.find(x=>x.id===id);if(!cur)return;
+      // Only what the text says (the Cloudflare route echoes the text back as a "transcript").
+      const next=C.applyUnderstanding(cur,{...res,transcript:'',heard:false,onScreen:'',shows:''},{markReviewed:false});
+      state.records[state.records.indexOf(cur)]=next;
+      state.plan=C.prunePlan(state.plan,state.records);commit();
+      const n=(next.places||[]).length;
+      toast(n?`Found ${plural(n,'place','places')} in “${name()}”.`:`Read “${name()}”: it names no places.`);
+    }finally{reading.delete(id);if(currentTab==='library')renderLibrary();}
   }
   function addToPlan(id){
     const r=state.records.find(r=>r.id===id); if(!r)return;
     if(state.plan.some(p=>p.recordId===id)){toast('This discovery is already in your itinerary.');return;}
-    // It goes to the first day set to its city.
-    const day=C.dayForClip(r,state.dayCities,state.dayCount);
-    state.plan.push({id:'stop-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),recordId:id,day,note:''});
-    commit();toast(`Added to ${dayLabel(day)}. Open Itinerary to organize it.`);
+    // Each place goes to the first day set to its city (a clip with no places listed: the clip itself).
+    const items=C.tripItems([r]),days=[];
+    if(!items.length){toast(`This ${r.kind==='link'?'page':'note'} names no places yet. Press ✦ Read, or add its places in Edit.`);return;}
+    for(const it of items){const day=C.dayForClip(it,state.dayCities,state.dayCount);days.push(day);
+      state.plan.push({id:stopId(),recordId:id,...(it.placeId?{placeId:it.placeId}:{}),day,note:''});}
+    const where=[...new Set(days)];
+    commit();toast(`Added ${items.length>1?plural(items.length,'place','places')+' ':''}to ${where.length===1?dayLabel(where[0]):'days '+where.join(', ')}. Open Itinerary to organize ${items.length>1?'them':'it'}.`);
   }
   function movePlan(id,offset){
     const a=state.plan.findIndex(p=>p.id===id);if(a<0)return;
@@ -383,6 +613,7 @@
           clean.dayCount=C.cleanDayCount(data.state.dayCount);
           clean.plan.forEach(p=>{p.day=Math.min(Number(p.day),clean.dayCount);});
           clean.dayCities=C.cleanDayCities(data.state.dayCities,clean.dayCount);
+          clean.questions=C.cleanQuestions(data.state.questions);
           if(Array.isArray(data.state.categories))clean.categories=C.normalizeCategories(data.state.categories);
           if(data.state.settings)clean.settings=data.state.settings;
           state=C.ensureSetup(clean).state;if(!Array.isArray(state.categories))state=C.applyStarter(state,'empty');
@@ -655,7 +886,12 @@
     $('#bulkAll').disabled=!shownIds.length;
     fillCategorySelect($('#bulkMove'),false);
     $('#bulkMove').insertAdjacentHTML('afterbegin','<option value="" selected>Move to category…</option>');$('#bulkMove').value='';
-    for(const id of ['bulkMove','bulkReviewed','bulkDelete'])$('#'+id).disabled=!n;
+    // Collections: add to any (or a new one); take out of the ones the selected clips are in.
+    const inThem=[...new Set(state.records.filter(r=>selected.has(r.id)).flatMap(r=>r.collections||[]))].sort((a,b)=>a.localeCompare(b));
+    $('#bulkCollect').innerHTML='<option value="" selected>Add to collection…</option>'+
+      `<optgroup label="Add to">${listCollections().map(c=>`<option value="add:${html(c)}">＋ ${html(c)}</option>`).join('')}<option value="new">＋ New collection…</option></optgroup>`+
+      (inThem.length?`<optgroup label="Take out of">${inThem.map(c=>`<option value="drop:${html(c)}">− ${html(c)}</option>`).join('')}</optgroup>`:'');
+    for(const id of ['bulkMove','bulkCollect','bulkReviewed','bulkDelete'])$('#'+id).disabled=!n;
     $('#bulkDelete').textContent=n?`Delete ${n}`:'Delete';
   }
   function setSelecting(on){selecting=on;if(!on)selected.clear();renderLibrary();}
@@ -682,6 +918,13 @@
     $('#bulkReviewed').addEventListener('click',()=>bulkUpdate({status:'reviewed'},n=>`Marked ${n} clip${n===1?'':'s'} reviewed.`));
     $('#bulkMove').addEventListener('change',e=>{const to=e.target.value;if(!to)return;
       bulkUpdate({category:to},n=>`Moved ${n} clip${n===1?'':'s'} to ${to}.`);});
+    $('#bulkCollect').addEventListener('change',e=>{
+      const v=e.target.value;if(!v)return;
+      let name=v.startsWith('add:')?v.slice(4):'';
+      if(v==='new'){name=(prompt('Name of the new collection')||'').replace(/\s+/g,' ').trim().slice(0,60);if(!name){e.target.value='';return;}}
+      if(name)bulkUpdate({addTo:name},n=>`Added ${n} clip${n===1?'':'s'} to ${name}.`);
+      else if(v.startsWith('drop:')){const from=v.slice(5);bulkUpdate({removeFrom:from},n=>`Took ${n} clip${n===1?'':'s'} out of ${from}.`);}
+    });
     // In select mode a click anywhere on a card (but its buttons and links) picks it.
     $('#clipGrid').addEventListener('click',e=>{
       if(!selecting)return;
@@ -715,7 +958,7 @@
     $('#autoMarkWrap').hidden=$('#autoMode').value==='transcript';
     const speed=Number($('#autoSpeed').value)||1;
     const minutes=Math.ceil(queue.length*(5+45/speed)/60);  // most clips are under a minute; each plays to its end
-    const short=state.records.filter(r=>!C.playerUrl(r)).length;
+    const short=state.records.filter(r=>C.isClip(r)&&!C.playerUrl(r)).length;
     $('#autoEstimate').textContent=(queue.length?`${queue.length} clip${queue.length===1?'':'s'} · up to about ${minutes<90?minutes+' minutes':Math.round(minutes/6)/10+' hours'}.`:'No clips to auto-review in this list.')+
       (short?` ${short} short link${short===1?' (vm.tiktok.com) cannot play here and is':'s (vm.tiktok.com) cannot play here and are'} left out.`:'');
     $('#autoStart').disabled=!queue.length||!autoSupported();
@@ -852,6 +1095,7 @@
         // The library is one saved file of at most 2 MB: keep long transcripts short when it is nearly full.
         if(next.auto?.transcript&&JSON.stringify(state).length>1_700_000){next={...next,auto:{...next.auto,transcript:next.auto.transcript.slice(0,500)}};auto.trimmed=true;}
         state.records[i]=next;
+        if((next.places||[]).length)state.plan=C.prunePlan(state.plan,state.records);
         auto.tally[res.status]=(auto.tally[res.status]||0)+1;
         auto.finished++;
         if(res.use){auto.neurons+=res.use.neurons;auto.useClips++;if(res.use.partial)auto.usePartial=true;}
@@ -1239,9 +1483,9 @@
       return {status:'failed',reason:'AI_FAILED',detail:res.detail||res.reason,via:'Gemini'};
     }
   }
-  async function geminiPost(body){
+  async function geminiPost(body,purpose='clip'){
     let res,data;
-    try{res=await fetch('/api/gemini',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body});
+    try{res=await fetch('/api/gemini'+(purpose==='ask'?'?for=ask':''),{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body});
       data=await res.json().catch(()=>({}));}
     catch(_){return {status:'failed',reason:'GEMINI_FAILED',detail:'connection problem',retryAfter:5};}
     if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
@@ -1385,8 +1629,9 @@
       const coll=evt.target.closest('[data-collection]');if(coll){activeCollection=coll.dataset.collection;selectTab('library');return;}
       const action=evt.target.closest('[data-action]');if(!action)return;
       const {action:kind,id}=action.dataset;
-      if(kind==='watch'){rv.shown=shownIds.slice();openReview('shown',id);}
+      if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
+      else if(kind==='read-item')readItem(id);
       else if(kind==='plan')addToPlan(id);
       else if(kind==='delete'){
         const r=state.records.find(x=>x.id===id);
@@ -1398,6 +1643,9 @@
       else if(kind==='show-city')showCity(action.dataset.city);
       else if(kind==='jump-city'){const panel=[...$$('#itineraryCities .city-panel')].find(p=>p.dataset.cityKey===action.dataset.city.toLowerCase());if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'start'});}}
       else if(kind==='itinerary-view'){itineraryView=action.dataset.itineraryView;renderItinerary();}
+      else if(kind==='ask-again'){const q=(state.questions||[]).find(x=>x.id===id);if(q)askNow(q.q,q.id);}
+      else if(kind==='ask-delete'){state.questions=(state.questions||[]).filter(x=>x.id!==id);commit();}
+      else if(kind==='split-stop'){const r=state.records.find(x=>x.id===id);if(r){state.plan=C.splitClipStop(state.plan,r,stopId);commit();}}
       else if(kind==='trip-move'&&trip){const i=trip.cities.findIndex(t=>t.name===action.dataset.city),j=i+Number(action.dataset.step);
         if(i>=0&&j>=0&&j<trip.cities.length){[trip.cities[i],trip.cities[j]]=[trip.cities[j],trip.cities[i]];trip.edited=true;renderOverview();}}
       else if(kind==='trip-suggest'&&trip){const {o}=tripState();trip.cities=C.suggestDays(o.cities,state.dayCount);trip.from='suggested';trip.edited=false;trip.forDays=state.dayCount;renderOverview();}
@@ -1415,8 +1663,17 @@
     $('#cancelAnalyze').addEventListener('click',()=>{stopAnalysis=true;});
     $('#newCollection').addEventListener('click',addCollection);
     $('#editForm').addEventListener('submit',editorSave);
+    $('#kindPick').addEventListener('click',e=>{const b=e.target.closest('[data-kind]');if(b){setKind(b.dataset.kind,true);$('#modalError').textContent='';}});
+    $('#readPageBtn').addEventListener('click',readPageIntoEditor);
+    // A pasted link shows the right fields: a TikTok as a TikTok, any other page as a web link.
+    $('#editForm').elements.namedItem('url').addEventListener('change',e=>{if(editingId||editingKind==='note')return;
+      const v=e.target.value;if(editingKind==='link'&&C.parseTikTokURL(v))setKind('tiktok',true);else if(editingKind==='tiktok'&&!C.parseTikTokURL(v)&&C.webLink(v))setKind('link',true);});
     $('#closeDialog').addEventListener('click',()=>$('#editDialog').close());
     $('#cancelEdit').addEventListener('click',()=>$('#editDialog').close());
+    $('#askForm').addEventListener('submit',async e=>{e.preventDefault();if(await askNow($('#askInput').value))$('#askInput').value='';});
+    $('#askInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('#askForm').requestSubmit();}});
+    $('#addPlace').addEventListener('click',()=>{const row=placeRow({city:$('#editForm').elements.namedItem('city').value});$('#editPlaces').append(row);row.querySelector('.pl-name').focus();});
+    $('#editPlaces').addEventListener('click',e=>{const b=e.target.closest('.pl-remove');if(b)b.closest('.place-row').remove();});
     $('#search').addEventListener('input',renderLibrary);
     for(const id of ['categoryFilter','statusFilter','analysisFilter','sortFilter'])$('#'+id).addEventListener('change',renderLibrary);
     for(const [value,label] of Object.entries(C.ANALYSIS_LABELS))$('#analysisFilter').insertAdjacentHTML('beforeend',`<option value="${html(value)}">${html(label)}</option>`);
@@ -1441,7 +1698,7 @@
       const t=evt.target;if(!trip)return;
       if(t.id==='tripCountry'){trip={country:t.value,include:null,cities:null,edited:false};}
       else if(t.dataset.tripInclude!==undefined){
-        const all=C.tripOverview(state.records,categoryList(),trip.country).categories.map(c=>c.category);
+        const all=C.tripOverview(state.records,trip.country).types.map(t=>t.type);
         const on=new Set(trip.include||all);t.checked?on.add(t.dataset.tripInclude):on.delete(t.dataset.tripInclude);
         trip.include=all.every(c=>on.has(c))?null:[...on];
       }
@@ -1483,7 +1740,7 @@
     state = saved && Array.isArray(saved.records) ? {...emptyState(),...saved} : emptyState();
     if(!Array.isArray(state.plan))state.plan=[];
     if(!Array.isArray(state.collections))state.collections=[];
-    state.dayCount=C.cleanDayCount(state.dayCount);state.dayCities=C.cleanDayCities(state.dayCities,state.dayCount);
+    state.dayCount=C.cleanDayCount(state.dayCount);state.dayCities=C.cleanDayCities(state.dayCities,state.dayCount);state.questions=C.cleanQuestions(state.questions);
     const setup=C.ensureSetup(state);state=setup.state;return setup;
   }
   function authUI() {

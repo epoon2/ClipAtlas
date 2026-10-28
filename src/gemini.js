@@ -15,21 +15,27 @@
 // page moves on to Cloudflare) and "not on the free tier" (limit 0: try the next
 // model).
 
-export const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+// Each model has its own free daily limit. On a free key in October 2026 the Flash-Lite
+// models allowed 500 requests a day each and the full Flash models 20, so clips go to
+// Flash-Lite first (about 1,000 clips a day in all), and questions about a collection,
+// where reasoning counts more, to Flash first.
+export const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-3.6-flash'];
+export const GEMINI_ASK_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 export const GEMINI_MAX = 19 * 1024 * 1024;   // Google takes at most 20 MB inline in one request
 const API = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
-let working = null;          // the model that answered last
+const working = {};          // purpose -> the model that answered last
 const skip = new Map();      // model -> {until (ms), why: 'day'|'missing'} after it refused
 
 /** For tests: forget what was learned, as a fresh Worker instance would. */
-export function resetGeminiForTests() { working = null; skip.clear(); }
+export function resetGeminiForTests() { for (const k of Object.keys(working)) delete working[k]; skip.clear(); }
 
 const clip = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 
-export function modelList(env) {
-  const own = String(env && env.GEMINI_MODELS || '').split(',').map(s => s.trim()).filter(s => /^[a-z0-9.-]{3,60}$/.test(s));
-  return own.length ? own : GEMINI_MODELS;
+/** The models to try, in order: for clips (GEMINI_MODELS) or for questions (GEMINI_ASK_MODELS). */
+export function modelList(env, purpose = 'clip') {
+  const own = String(env && (purpose === 'ask' ? env.GEMINI_ASK_MODELS : env.GEMINI_MODELS) || '').split(',').map(s => s.trim()).filter(s => /^[a-z0-9.-]{3,60}$/.test(s));
+  return own.length ? own : purpose === 'ask' ? GEMINI_ASK_MODELS : GEMINI_MODELS;
 }
 
 /** May this account use Gemini? Everyone signed in, or only the addresses in GEMINI_USERS. */
@@ -80,10 +86,10 @@ export function readGeminiReply(body) {
  * takes it. Never throws. {status: 'ok', model, text, finish, usage} or
  * {status: 'failed', reason, detail, retryAfter, model} with ``http`` for the page.
  */
-export async function relayGemini(body, env, fetcher = fetch) {
+export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip') {
   const now = Date.now();
-  const all = modelList(env);
-  const order = [...(working && all.includes(working) ? [working] : []), ...all.filter(m => m !== working)]
+  const all = modelList(env, purpose), last_ = working[purpose];
+  const order = [...(last_ && all.includes(last_) ? [last_] : []), ...all.filter(m => m !== last_)]
     .filter(m => !(skip.get(m) && skip.get(m).until > now));
   if (!order.length) {
     if (all.some(m => skip.get(m) && skip.get(m).why === 'day'))
@@ -102,7 +108,7 @@ export async function relayGemini(body, env, fetcher = fetch) {
       return { status: 'failed', reason: 'GEMINI_FAILED', http: 502, retryAfter: 5, model, detail: clip(`gemini: ${err && err.message || err}`, 300) };
     }
     if (res.ok) {
-      working = model;
+      working[purpose] = model;
       const reply = readGeminiReply(data);
       if (reply.blocked) return { status: 'failed', reason: 'GEMINI_BLOCKED', http: 200, model, detail: `gemini (${model}): blocked (${reply.blocked})` };
       return { status: 'ok', model, ...reply };
@@ -111,9 +117,9 @@ export async function relayGemini(body, env, fetcher = fetch) {
     last = { status: 'failed', reason: REASONS[e.kind], http: e.kind === 'minute' || e.kind === 'day' ? 429 : 502,
       retryAfter: e.retryAfter, model, detail: clip(`gemini (${model}): ${e.detail}`, 300) };
     // A missing model, or one with no free requests, is skipped for an hour; the next one is tried.
-    if (e.kind === 'model' || e.kind === 'not_free') { skip.set(model, { until: now + 3600_000, why: 'missing' }); if (working === model) working = null; continue; }
+    if (e.kind === 'model' || e.kind === 'not_free') { skip.set(model, { until: now + 3600_000, why: 'missing' }); if (working[purpose] === model) delete working[purpose]; continue; }
     // Used up for today on this model: another model may still have requests left today.
-    if (e.kind === 'day') { skip.set(model, { until: now + 3600_000, why: 'day' }); if (working === model) working = null; day = last; continue; }
+    if (e.kind === 'day') { skip.set(model, { until: now + 3600_000, why: 'day' }); if (working[purpose] === model) delete working[purpose]; day = last; continue; }
     return last;
   }
   // Every model refused: "used up for today" says more than "no such model".
