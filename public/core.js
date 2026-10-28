@@ -528,7 +528,7 @@
     const fill = (key, value, n) => { if (!safeString(next[key]) && safeString(value)) next[key] = safeString(value).slice(0, n); };
     // Every place it named. A later run replaces them (keeping the ids of the same names), unless the person edited them.
     if (Array.isArray(res.places) && record.placesBy !== 'person') {
-      const places = cleanPlaces(res.places, record.places);
+      const places = cleanPlaces(res.places, record.places, { keepAddress: true });
       if (places.length || !(record.places || []).length) { next.places = places; next.placesBy = places.length ? 'auto' : undefined; }
     }
     const first = (next.places || [])[0] || {};
@@ -683,8 +683,9 @@
   /** A clip's places, checked: [{id, name, type, city, country, note}], at most 30,
       each name once. A place keeps its id, or the id of a ``previous`` place with
       the same name, so a day it is planned on stays when the list is redone. */
-  function cleanPlaces(list, previous = []) {
+  function cleanPlaces(list, previous = [], { keepAddress = false } = {}) {
     const old = new Map((Array.isArray(previous) ? previous : []).map(p => [safeString(p && p.name).toLowerCase(), p && p.id]));
+    const oldAddress = new Map((Array.isArray(previous) ? previous : []).map(p => [safeString(p && p.name).toLowerCase(), safeString(p && p.address)]));
     const seen = new Set(), out = [];
     for (const p of Array.isArray(list) ? list : []) {
       if (!p || typeof p !== 'object') continue;
@@ -694,7 +695,9 @@
       const own = safeString(p.id), prev = old.get(k);
       out.push({ id: /^pl-[a-z0-9]{4,16}$/.test(own) ? own : /^pl-[a-z0-9]{4,16}$/.test(prev || '') ? prev : newPlaceId(),
         name, type: placeType(p.type), city: safeString(p.city).replace(/\s+/g, ' ').slice(0, 60),
-        country: safeString(p.country).replace(/\s+/g, ' ').slice(0, 60), note: safeString(p.note).replace(/\s+/g, ' ').slice(0, 200) });
+        country: safeString(p.country).replace(/\s+/g, ' ').slice(0, 60),
+        address: (safeString(p.address).replace(/\s+/g, ' ') || (keepAddress && oldAddress.get(k)) || '').slice(0, 200),
+        note: safeString(p.note).replace(/\s+/g, ' ').slice(0, 200) });
     }
     return out;
   }
@@ -706,11 +709,20 @@
       const places = Array.isArray(r.places) ? r.places : [];
       if (!isClip(r) && !places.length) continue;   // a note or page that names no place is not a stop
       if (places.length) for (const p of places) out.push({ key: r.id + '#' + p.id, recordId: r.id, placeId: p.id, name: p.name, type: placeType(p.type),
-        city: cityName(p.city) || cityName(r.city), country: safeString(p.country) || safeString(r.country), note: p.note || '', record: r });
+        city: cityName(p.city) || cityName(r.city), country: safeString(p.country) || safeString(r.country), address: safeString(p.address), note: p.note || '', record: r });
       else out.push({ key: r.id + '#', recordId: r.id, placeId: '', name: safeString(r.place) || safeString(r.title) || 'Saved TikTok',
-        type: placeType(r.category), city: cityName(r.city), country: safeString(r.country), note: '', record: r });
+        type: placeType(r.category), city: cityName(r.city), country: safeString(r.country), address: '', note: '', record: r, whole: true });
     }
     return out;
+  }
+  /** A Google Maps link that finds a place: by its address when known, else by its name, city and
+      country. '' when there is nothing to look for (a whole clip with no place named). */
+  function mapsUrl(p) {
+    const name = safeString(p && p.name), address = safeString(p && p.address);
+    if (!address && (!name || (p && p.whole && !safeString(p.record && p.record.place)))) return '';
+    const q = address ? (name && !address.toLowerCase().includes(name.toLowerCase()) ? name + ', ' + address : address)
+      : [name, p.city, p.country].map(safeString).filter(Boolean).join(', ');
+    return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
   }
   /** The day each item is planned on: its own stop, or its clip's whole-clip stop. */
   function planDays(plan) {
@@ -840,8 +852,8 @@
         ' "country": "only if said or shown, or certain from the city, else empty",',
         ' "category": "exactly one category name from the list, or Unsorted if none fits",',
         ' "tags": ["up to 6 short lowercase keywords"],',
-        ' "places": [every place the video names and recommends or shows (restaurants, stalls, cafes, shops, markets, sights, activities, hotels), each once, in the order they come: {"name": "as written", "type": "food, shopping, sightseeing, activity or stay", "city": "if said or shown", "country": "if said or shown, or certain from the city", "note": "what to get or do there, from the video, at most 15 words"}; empty if none is named]}'].join('\n'),
-      'Never guess a place, city or name that is not said or shown.'].join('\n\n');
+        ' "places": [every place the video names and recommends or shows (restaurants, stalls, cafes, shops, markets, sights, activities, hotels), each once, in the order they come: {"name": "as written", "type": "food, shopping, sightseeing, activity or stay", "city": "if said or shown", "country": "if said or shown, or certain from the city", "address": "its street address only if said or shown (on screen, in the caption or on a sign), as written, else empty", "note": "what to get or do there, from the video, at most 15 words"}; empty if none is named]}'].join('\n'),
+      'Never guess a place, city, address or name that is not said or shown.'].join('\n\n');
   }
   function categoryLines(categories) {
     return (categories || []).filter(c => c && c.name && c.name !== 'Unsorted')
@@ -855,8 +867,8 @@
       ['{"title": "what it is about, at most 80 characters",', ' "summary": "one or two sentences",',
         ' "place": "the main place, if there is one, else empty", "city": "the main city, if any", "country": "if said, or certain from the city",',
         ' "category": "exactly one category name from the list, or Unsorted if none fits",', ' "tags": ["up to 6 short lowercase keywords"],',
-        ' "places": [every place it names and recommends (restaurants, stalls, cafes, shops, markets, sights, activities, hotels), each once, in order: {"name": "as written", "type": "food, shopping, sightseeing, activity or stay", "city": "if said", "country": "if said or certain from the city", "note": "what to get or do there, at most 15 words"}; empty if none is named]}'].join('\n'),
-      'Never guess a place, city or name that is not in the text.',
+        ' "places": [every place it names and recommends (restaurants, stalls, cafes, shops, markets, sights, activities, hotels), each once, in order: {"name": "as written", "type": "food, shopping, sightseeing, activity or stay", "city": "if said", "country": "if said or certain from the city", "address": "its street address only if the text gives it, as written, else empty", "note": "what to get or do there, at most 15 words"}; empty if none is named]}'].join('\n'),
+      'Never guess a place, city, address or name that is not in the text.',
       'Text:\n<<<\n' + safeString(body).slice(0, 60000) + '\n>>>'].join('\n\n');
   }
   /** The Gemini request for a saved web page or note. */
@@ -879,8 +891,8 @@
       : { type: 'OBJECT', propertyOrdering: DETAIL_KEYS, required: DETAIL_KEYS,
         properties: { transcript: str, on_screen_text: str, shows: str, creator: str, title: str, summary: str, place: str, city: str, country: str,
           category: { type: 'STRING', format: 'enum', enum: names }, tags: { type: 'ARRAY', items: str },
-          places: { type: 'ARRAY', items: { type: 'OBJECT', propertyOrdering: ['name', 'type', 'city', 'country', 'note'], required: ['name', 'type'],
-            properties: { name: str, type: { type: 'STRING', format: 'enum', enum: PLACE_TYPES }, city: str, country: str, note: str } } } } };
+          places: { type: 'ARRAY', items: { type: 'OBJECT', propertyOrdering: ['name', 'type', 'city', 'country', 'address', 'note'], required: ['name', 'type'],
+            properties: { name: str, type: { type: 'STRING', format: 'enum', enum: PLACE_TYPES }, city: str, country: str, address: str, note: str } } } } };
     const parts = [{ text: geminiPrompt(mode, categories, { audio: !!audio, sheets: images.length }) }];
     if (audio) parts.push({ inlineData: { mimeType: 'audio/wav', data: audio } });
     for (const img of images) parts.push({ inlineData: { mimeType: 'image/jpeg', data: img } });
@@ -944,7 +956,7 @@
       const cut = (v, k) => { const t = safeString(v).replace(/\s+/g, ' '); return t.length > k ? t.slice(0, k) + '…' : t; };
       const kind = r.kind === 'note' ? 'Note' : r.kind === 'link' ? 'Web page' : 'TikTok';
       const head = [`[${n}] ${kind}: "${cut(r.title || r.place || 'untitled', 150)}"`, safeString(r.category), [r.place, r.city, r.country].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
-      const places = (r.places || []).map(p => `${p.name} (${PLACE_LABELS[placeType(p.type)].toLowerCase()}${p.city ? ', ' + p.city : ''})${p.note ? ': ' + cut(p.note, 120) : ''}`).join('; ');
+      const places = (r.places || []).map(p => `${p.name} (${PLACE_LABELS[placeType(p.type)].toLowerCase()}${p.city ? ', ' + p.city : ''}${p.address ? ', ' + cut(p.address, 120) : ''})${p.note ? ': ' + cut(p.note, 120) : ''}`).join('; ');
       const auto = r.auto || {};
       return [head,
         places && `Places: ${cut(places, short ? 600 : 2000)}`,
@@ -1163,6 +1175,9 @@
           const loc = [place.city || r.city, place.country || r.country].filter(Boolean).join(', ');
           if (loc) out += ` — ${loc}`;
           if (place.note) out += `\n   - ${place.note.replace(/\s+/g, ' ')}`;
+          if (place.address) out += `\n   - Address: ${place.address}`;
+          const map = mapsUrl({ ...place, city: place.city || r.city, country: place.country || r.country });
+          if (map) out += `\n   - Map: ${map}`;
           out += `\n   - From: ${r.title || (isClip(r) ? 'a saved TikTok' : r.kind === 'link' ? 'a saved page' : 'your note')}${r.url ? ` (${r.url})` : ''}\n`;
         } else {
           out += `${i + 1}. **${r.title || r.place || 'Saved TikTok'}**`;
@@ -1178,5 +1193,5 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+  return { mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

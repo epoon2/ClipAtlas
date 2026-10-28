@@ -541,3 +541,36 @@ test('Ask: a saved page counts as a source with its text',()=>{
  assert.ok(src.text.length>4000,'a long page is not cut to a few lines');
  assert.match(src.text,/Link: https:\/\/example.com\/guide/);
 });
+
+// ---- Addresses and map links
+test('a place keeps its address; a new AI answer with none keeps the one found before, an edit can clear it',()=>{
+ const first=C.cleanPlaces([{name:'Fuhang Soy Milk',type:'food',city:'Taipei',address:' 2F, No. 108,  Sec. 1, Zhongxiao E Rd '}]);
+ assert.equal(first[0].address,'2F, No. 108, Sec. 1, Zhongxiao E Rd');
+ const again=C.cleanPlaces([{name:'Fuhang Soy Milk',type:'food'}],first,{keepAddress:true});
+ assert.deepEqual([again[0].id,again[0].address],[first[0].id,first[0].address]);
+ assert.equal(C.cleanPlaces([{name:'Fuhang Soy Milk',type:'food',address:''}],first)[0].address,'','cleared in Edit stays cleared');
+ assert.equal(C.cleanPlaces([{name:'X',address:'a'.repeat(500)}])[0].address.length,200);
+ const r=C.applyUnderstanding(C.createRecord({url:long,places:first,placesBy:'auto'}),{status:'understood',title:'t',places:[{name:'Fuhang Soy Milk',type:'food'}]});
+ assert.equal(r.places[0].address,first[0].address,'a redo that saw no address keeps the earlier one');
+ assert.equal(C.tripItems([r])[0].address,first[0].address);
+});
+test('a Google Maps link for a place: by its address when known, else by name, city and country',()=>{
+ const base='https://www.google.com/maps/search/?api=1&query=';
+ assert.equal(C.mapsUrl({name:'Fuhang Soy Milk',address:'No. 108, Zhongxiao E Rd, Taipei'}),base+encodeURIComponent('Fuhang Soy Milk, No. 108, Zhongxiao E Rd, Taipei'));
+ assert.equal(C.mapsUrl({name:'Din Tai Fung',address:'Din Tai Fung, Xinyi Rd'}),base+encodeURIComponent('Din Tai Fung, Xinyi Rd'),'the name is not said twice');
+ assert.equal(C.mapsUrl({name:'Raohe Night Market',city:'Taipei',country:'Taiwan'}),base+encodeURIComponent('Raohe Night Market, Taipei, Taiwan'));
+ const clip=C.createRecord({url:long,title:'Taipei Food Review',city:'Taipei'});
+ assert.equal(C.mapsUrl(C.tripItems([clip])[0]),'','a whole clip with no place named has nothing to look for');
+ const named=C.createRecord({url:long,title:'Noodles',place:'Lin Dong Fang',city:'Taipei'});
+ assert.match(C.mapsUrl(C.tripItems([named])[0]),/Lin%20Dong%20Fang%2C%20Taipei/);
+});
+test('the export gives each place its address and a map link; Ask gets the address too',()=>{
+ const r=C.createRecord({url:long,title:'Taipei eats',places:[{name:'Fuhang Soy Milk',type:'food',city:'Taipei',country:'Taiwan',address:'No. 108, Zhongxiao E Rd'}]});
+ const md=C.planMarkdown([{id:'s1',recordId:r.id,placeId:r.places[0].id,day:1,note:''}],[r],'Trip',{});
+ assert.match(md,/   - Address: No\. 108, Zhongxiao E Rd\n   - Map: https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=Fuhang%20Soy%20Milk%2C%20No\.%20108%2C%20Zhongxiao%20E%20Rd\n/);
+ assert.match(C.askSources([r]).text,/Fuhang Soy Milk \(food, Taipei, No\. 108, Zhongxiao E Rd\)/);
+ const req=C.geminiRequest({categories:[{name:'Food'}]}),item=req.generationConfig.responseSchema.properties.places.items;
+ assert.ok(item.properties.address&&item.propertyOrdering.includes('address')&&!item.required.includes('address'));
+ assert.match(req.contents[0].parts[0].text,/"address": "its street address only if said or shown/);
+ assert.match(C.geminiTextRequest({kind:'link',body:'x'}).contents[0].parts[0].text,/"address": "its street address only if the text gives it/);
+});

@@ -230,7 +230,7 @@
   function sourceLink(r,isPlace){
     const what=C.isClip(r)?'TikTok':r.kind==='link'?'page':'note';
     if(!r.url)return `<span class="stop-from">From your note “${html(r.title||'untitled')}”</span>`;
-    return `<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer">${isPlace?'From “'+html(r.title||(what==='TikTok'?'a saved TikTok':hostOf(r.url)))+'” ↗':what==='TikTok'?'View original TikTok ↗':'Open the page ↗'}</a>`;
+    return `<a class="stop-source" href="${html(r.url)}" target="_blank" rel="noopener noreferrer">${isPlace?'From “'+html(r.title||(what==='TikTok'?'a saved TikTok':hostOf(r.url)))+'” ↗':what==='TikTok'?'View original TikTok ↗':'Open the page ↗'}</a>`;
   }
   const dayCitiesOf=day=>(state.dayCities&&state.dayCities[day])||[];
   const dayLabel=day=>{const c=dayCitiesOf(day);return `Day ${day}${c.length?' · '+c.join(', '):''}`;};
@@ -310,8 +310,8 @@
   // What one stop is: a place of a clip, or a whole clip.
   function stopItem(entry,r){
     const place=entry.placeId?(r.places||[]).find(p=>p.id===entry.placeId):null;
-    if(place)return {name:place.name,type:C.placeType(place.type),city:place.city||r.city||'',country:place.country||r.country||'',note:place.note||'',place:true};
-    return {name:r.title||r.place||'Saved TikTok',type:'',city:r.city||'',country:r.country||'',note:'',place:false};
+    if(place)return {name:place.name,type:C.placeType(place.type),city:place.city||r.city||'',country:place.country||r.country||'',address:place.address||'',note:place.note||'',place:true};
+    return {name:r.title||r.place||'Saved TikTok',type:'',city:r.city||'',country:r.country||'',address:'',note:'',place:false};
   }
   function renderDays() {
     const days=$('#itineraryDays'); const byId=new Map(state.records.map(r=>[r.id,r]));
@@ -331,7 +331,9 @@
         const away=cities.length&&it.city.trim()&&!cities.some(c=>c.toLowerCase()===it.city.trim().toLowerCase());
         const where=it.place?[kindLabel(it.type),it.city,it.note].filter(Boolean).join(' · '):[r.place,r.city,r.country].filter(Boolean).join(' · ')||r.category;
         const whole=!it.place&&(r.places||[]).length>1?`<p class="stop-places">📍 ${html(r.places.map(p=>p.name).join(' · '))} <button type="button" class="link-inline" data-action="split-stop" data-id="${html(r.id)}">Give each place its own stop</button></p>`:'';
-        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(it.name)}</h4><p>${html(where)}${away?` <span class="stop-away">not in ${html(cities.join(' or '))}</span>`:''}</p>${whole}${sourceLink(r,!!it.place)}<input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices(day)}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
+        const map=C.mapsUrl(it.place?it:{name:r.place,city:r.city,country:r.country});
+        const address=it.address||map?`<p class="stop-address">${it.address?'📍 '+html(it.address)+' ':''}${map?`<a href="${html(map)}" target="_blank" rel="noopener noreferrer">${it.address?'Map ↗':'📍 Find it on Google Maps ↗'}</a>`:''}</p>`:'';
+        s+=`<div class="stop"><span class="stop-n">${j+1}</span><div><h4>${html(it.name)}</h4><p>${html(where)}${away?` <span class="stop-away">not in ${html(cities.join(' or '))}</span>`:''}</p>${address}${whole}${sourceLink(r,!!it.place)} <button type="button" class="link-inline stop-edit" data-action="edit-item" data-id="${html(r.id)}" data-place="${html(entry.placeId||'')}" title="Edit: city, places, notes…">✎ Edit</button><input value="${html(entry.note||'')}" placeholder="Plan note (time, order, reservation…)" data-plan-note="${html(entry.id)}" aria-label="Plan note" /></div><div class="stop-actions"><select data-plan-day="${html(entry.id)}" aria-label="Move stop to day">${choices(day)}</select><button data-action="up" data-id="${html(entry.id)}" ${j===0?'disabled':''} title="Move earlier">↑</button><button data-action="down" data-id="${html(entry.id)}" ${j===items.length-1?'disabled':''} title="Move later">↓</button><button data-action="remove-plan" data-id="${html(entry.id)}" title="Remove from itinerary">✕</button></div></div>`;
       }
       s+='</section>';
     }
@@ -348,19 +350,32 @@
     for(const c of board){
       const days=c.name?Object.keys(state.dayCities||{}).map(Number).filter(d=>d<=state.dayCount&&dayCitiesOf(d).some(x=>x.toLowerCase()===c.name.toLowerCase())):[];
       s+=`<details class="city-panel${c.name?'':' city-unknown'}" data-city-key="${html(c.name.toLowerCase())}"${c.name?' open':''}><summary><span class="city-name">${c.name?'📍 '+html(c.name):'City not known yet'}</span><small>${html([c.country,`${c.count} saved`,`${c.planned} planned`,days.length?'Day '+days.join(', '):''].filter(Boolean).join(' · '))}</small></summary>`;
-      if(!c.name)s+='<p class="hint city-note">Fill in a city in Edit or Review mode (or let auto-review find it) and it moves into its city.</p>';
+      if(!c.name)s+='<p class="hint city-note">Type a city next to one and press Enter, or open it with ✎ to fix its details; it moves into that city.</p>';
       s+='<div class="city-groups">';
       for(const g of c.groups){
         s+=`<div class="city-group"><h4>${kindLabel(g.type)} <small>${g.items.length}</small></h4><ul>`;
         for(const {item:it,day} of g.items){
           const r=it.record,where=[it.note,it.placeId?'from “'+(r.title||'a saved TikTok')+'”':r.status!=='reviewed'?'needs review':''].filter(Boolean).join(' · ');
-          s+=`<li class="city-item${day?' planned':''}"><div class="city-item-text"><strong>${html(it.name)}</strong>${where?`<span>${html(where)}</span>`:''}</div><div class="city-item-actions">${r.url?`<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}" aria-label="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}">↗</a>`:`<span class="from-note" title="From your note “${html(r.title||'')}”">📝</span>`}<select data-city-plan="${html(it.key)}" aria-label="Plan ${html(it.name)} on a day">${options(day)}</select></div></li>`;
+          const map=C.mapsUrl(it);
+          s+=`<li class="city-item${day?' planned':''}"><div class="city-item-text"><strong>${html(it.name)}</strong>${it.address?`<span class="city-address">📍 ${html(it.address)}</span>`:''}${where?`<span>${html(where)}</span>`:''}</div><div class="city-item-actions">${map?`<a class="map-link" href="${html(map)}" target="_blank" rel="noopener noreferrer" title="Open in Google Maps" aria-label="Open ${html(it.name)} in Google Maps">📍</a>`:''}${c.name?'':`<input class="city-fill" data-city-fill="${html(it.key)}" list="cityOptions" maxlength="60" placeholder="City" aria-label="City of ${html(it.name)}" />`}<button type="button" class="city-edit" data-action="edit-item" data-id="${html(r.id)}" data-place="${html(it.placeId)}" title="Edit: city, places, notes…" aria-label="Edit ${html(it.name)}">✎</button>${r.url?`<a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" title="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}" aria-label="${C.isClip(r)?'Open the TikTok it is from':'Open the page it is from'}">↗</a>`:`<span class="from-note" title="From your note “${html(r.title||'')}”">📝</span>`}<select data-city-plan="${html(it.key)}" aria-label="Plan ${html(it.name)} on a day">${options(day)}</select></div></li>`;
         }
         s+='</ul></div>';
       }
       s+='</div></details>';
     }
     box.innerHTML=s;
+  }
+  // A city typed in By city for a place (or a clip with no places listed) that had none.
+  function setItemCity(key,city){
+    city=String(city||'').replace(/\s+/g,' ').trim().slice(0,60);if(!city)return;
+    const [recordId,placeId='']=String(key).split('#');
+    const r=state.records.find(x=>x.id===recordId);if(!r)return;
+    const next={...r,updatedAt:new Date().toISOString()};let name=r.place||r.title||'It';
+    if(placeId){const p=(r.places||[]).find(x=>x.id===placeId);if(!p)return;name=p.name;
+      // Changed by the person, so a later auto-review leaves the places as they are now.
+      next.places=r.places.map(x=>x.id===placeId?{...x,city}:x);next.placesBy='person';}
+    else next.city=city;
+    state.records[state.records.indexOf(r)]=next;commit();toast(`${name} is in ${city} now.`);
   }
   function showCity(name){
     itineraryView='cities';renderItinerary();
@@ -411,7 +426,7 @@
     $('#placesLabel').textContent=editingKind==='tiktok'?'PLACES IN THIS CLIP':editingKind==='link'?'PLACES ON THIS PAGE':'PLACES IN THIS NOTE';
     if(editingKind!=='tiktok')$('#editHeard').hidden=true;
   }
-  function openEditor(id=null,kind='tiktok') {
+  function openEditor(id=null,kind='tiktok',focus) {
     editingId=id; const r=state.records.find(x=>x.id===id);
     $('#modalError').textContent='';$('#readPageStatus').textContent='';editorReadAt='';
     const form=$('#editForm'); form.reset();
@@ -428,18 +443,25 @@
     $('#copyEditTranscript').hidden=!said;
     setKind(r?(r.kind||'tiktok'):kind,!r);
     $('#editDialog').showModal();
+    if(r&&focus!==undefined){
+      const row=focus&&[...$$('#editPlaces .place-row')].find(x=>x.dataset.placeId===focus);
+      const el=row?row.querySelector('.pl-city'):form.elements.namedItem('city');
+      if(row)row.classList.add('focus');el.focus();el.scrollIntoView({block:'center'});
+    }
   }
-  // One place in the Edit dialog: name, kind, city, note.
+  // One place in the Edit dialog: name, kind, city, note, address.
   function placeRow(p={}){
     const row=document.createElement('div');row.className='place-row';row.dataset.placeId=p.id||'';
-    row.innerHTML=`<input class="pl-name" placeholder="Place name" aria-label="Place name" maxlength="100" /><select class="pl-type" aria-label="Kind of place">${C.PLACE_TYPES.map(t=>`<option value="${t}">${C.PLACE_EMOJI[t]} ${C.PLACE_LABELS[t]}</option>`).join('')}</select><input class="pl-city" placeholder="City" aria-label="City" maxlength="60" /><input class="pl-note" placeholder="What to get or do there" aria-label="Note" maxlength="200" /><button type="button" class="pl-remove icon-only" aria-label="Remove this place">✕</button>`;
+    row.innerHTML=`<input class="pl-name" placeholder="Place name" aria-label="Place name" maxlength="100" /><select class="pl-type" aria-label="Kind of place">${C.PLACE_TYPES.map(t=>`<option value="${t}">${C.PLACE_EMOJI[t]} ${C.PLACE_LABELS[t]}</option>`).join('')}</select><input class="pl-city" placeholder="City" aria-label="City" maxlength="60" /><input class="pl-note" placeholder="What to get or do there" aria-label="Note" maxlength="200" /><button type="button" class="pl-remove icon-only" aria-label="Remove this place">✕</button><input class="pl-address" placeholder="Address (optional; paste it from Google Maps)" aria-label="Address" maxlength="200" />`;
+    row.dataset.country=p.country||'';row.querySelector('.pl-address').value=p.address||'';
     row.querySelector('.pl-name').value=p.name||'';row.querySelector('.pl-type').value=C.placeType(p.type||'sightseeing');
     row.querySelector('.pl-city').value=p.city||'';row.querySelector('.pl-note').value=p.note||'';
     return row;
   }
   function editorPlaces(){
     return [...$$('#editPlaces .place-row')].map(row=>({id:row.dataset.placeId||undefined,name:row.querySelector('.pl-name').value,
-      type:row.querySelector('.pl-type').value,city:row.querySelector('.pl-city').value,note:row.querySelector('.pl-note').value}));
+      type:row.querySelector('.pl-type').value,city:row.querySelector('.pl-city').value,country:row.dataset.country||'',
+      address:row.querySelector('.pl-address').value,note:row.querySelector('.pl-note').value}));
   }
   const LIBRARY_FULL=1_850_000;   // the library is saved as one file of at most 2 MB
   function editorSave(evt) {
@@ -459,7 +481,7 @@
     if(duplicate){err(kind==='tiktok'?'This video is already saved. Edit its existing card instead.':'This page is already saved. Edit its existing card instead.');return;}
     // The places as the dialog has them; if they differ from what auto-review found, they are the person's now.
     const places=C.cleanPlaces(editorPlaces(),old?.places||[]);
-    const same=(a,b)=>JSON.stringify((a||[]).map(p=>[p.name,p.type,p.city,p.note]))===JSON.stringify((b||[]).map(p=>[p.name,p.type,p.city,p.note]));
+    const same=(a,b)=>JSON.stringify((a||[]).map(p=>[p.name,p.type,p.city,p.address||'',p.note]))===JSON.stringify((b||[]).map(p=>[p.name,p.type,p.city,p.address||'',p.note]));
     const placesBy=same(places,old?.places)?old?.placesBy:(places.length?'person':undefined);
     // A web page or note is the person's own: it needs no review.
     const created=C.createRecord({...source,kind,status:kind==='tiktok'?source.status:'reviewed',id:old?.id,savedAt:old?.savedAt,createdAt:old?.createdAt,
@@ -1066,7 +1088,7 @@
     if(where)out.push(`<p class="found-where">📍 ${html(where)}</p>`);
     if(res.summary)out.push(`<p class="found-summary">${html(res.summary)}</p>`);
     const places=r.places||[];
-    if(places.length)out.push(`<ul class="found-places">${places.map(p=>`<li>${C.PLACE_EMOJI[C.placeType(p.type)]} <b>${html(p.name)}</b>${p.city?' · '+html(p.city):''}${p.note?' — '+html(p.note):''}</li>`).join('')}</ul>`
+    if(places.length)out.push(`<ul class="found-places">${places.map(p=>`<li>${C.PLACE_EMOJI[C.placeType(p.type)]} <b>${html(p.name)}</b>${p.city?' · '+html(p.city):''}${p.note?' — '+html(p.note):''}${p.address?` <span class="found-address">📍 ${html(p.address)}</span>`:''}</li>`).join('')}</ul>`
       +(r.placesBy==='person'?'<p class="found-note">These are the places as you edited them; auto-review leaves them as they are.</p>':''));
     for(const [label,text,n] of [['Heard',res.transcript,280],['On screen',res.onScreen,200],['Seen',res.shows,160]])
       if(cut(text,n))out.push(`<p class="found-quote"><span>${label}</span> “${html(cut(text,n))}”</p>`);
@@ -1677,6 +1699,7 @@
       if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
       else if(kind==='read-item')readItem(id);
+      else if(kind==='edit-item')openEditor(id,'tiktok',action.dataset.place||'');
       else if(kind==='use-category'){const r=state.records.find(x=>x.id===id),cat=action.dataset.category;
         if(r&&categoryList().some(c=>c.name===cat)){state.records[state.records.indexOf(r)]={...r,category:cat,autoSorted:undefined,updatedAt:new Date().toISOString()};commit();
           const p=action.closest('.found-suggest');if(p)p.textContent=`Moved to ${emojiFor(cat)} ${cat}.`;}}
@@ -1757,6 +1780,7 @@
     });
     $('#itineraryCities').addEventListener('change',evt=>{
       if(evt.target.dataset.cityPlan)planOnDay(evt.target.dataset.cityPlan,Number(evt.target.value));
+      else if(evt.target.dataset.cityFill)setItemCity(evt.target.dataset.cityFill,evt.target.value);
     });
     $('#itineraryDays').addEventListener('change',evt=>{
       if(evt.target.dataset.planDay){const p=state.plan.find(p=>p.id===evt.target.dataset.planDay);if(p){p.day=Number(evt.target.value);commit();}}

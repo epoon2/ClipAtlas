@@ -187,11 +187,51 @@ const iceCream = page.locator('#itineraryCities .city-item', { has: page.locator
 check('a place says which TikTok it is from', /from “Ximending shopping street”/.test(await iceCream.locator('span').textContent()));
 await iceCream.locator('select').selectOption('1');
 await page.click('[data-itinerary-view="days"]');
-const day1 = await page.$$eval('#itineraryDays .day-panel:first-child .stop', els => els.map(e => [e.querySelector('h4').textContent, e.querySelector('a').textContent]));
+const day1 = await page.$$eval('#itineraryDays .day-panel:first-child .stop', els => els.map(e => [e.querySelector('h4').textContent, e.querySelector('a.stop-source').textContent]));
 check('the place is a stop of its own, linked to its TikTok', JSON.stringify(day1) === JSON.stringify([['Airport tips', 'View original TikTok ↗'], ['Snow King Ice Cream', 'From “Ximending shopping street” ↗']]), JSON.stringify(day1));
 const [placesFile] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan')]);
 const placesMd = fs.readFileSync(await placesFile.path(), 'utf8');
-check('the export names the place, its kind and where it came from', /\*\*Snow King Ice Cream\*\* \(Food\) — Taipei, Taiwan\n   - From: Ximending shopping street \(https:/.test(placesMd), placesMd.slice(0, 400));
+check('the export names the place, its kind and where it came from', /\*\*Snow King Ice Cream\*\* \(Food\) — Taipei, Taiwan\n   - Map: https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=Snow%20King%20Ice%20Cream%2C%20Taipei%2C%20Taiwan\n   - From: Ximending shopping street \(https:/.test(placesMd), placesMd.slice(0, 400));
+
+// Fixing details from the itinerary: ✎ opens Edit at that place; a city typed in By city moves a clip that had none.
+await page.click('[data-itinerary-view="cities"]');
+await iceCream.locator('[data-action="edit-item"]').click();
+await page.waitForSelector('#editDialog[open]');
+const focused = await page.evaluate(() => { const a = document.activeElement, row = a.closest('.place-row'); return [a.className, row && row.querySelector('.pl-name').value, !!row && row.classList.contains('focus')]; });
+check('✎ in By city opens the clip in Edit, at that place\'s city', JSON.stringify(focused) === '["pl-city","Snow King Ice Cream",true]', JSON.stringify(focused));
+await page.fill('.place-row.focus .pl-city', 'Tainan');
+await page.fill('.place-row.focus .pl-address', 'No. 1, Ximen Rd, West Central District');
+await page.locator('.places-edit').screenshot({ path: '/tmp/clipatlas-edit-places.png' });
+await page.click('#editForm [type="submit"]');
+check('a place given another city in Edit moves there', await page.locator('#itineraryCities .city-panel[data-city-key="tainan"] .city-item strong', { hasText: 'Snow King Ice Cream' }).count() === 1);
+const snow = page.locator('#itineraryCities .city-item', { has: page.locator('strong', { hasText: 'Snow King Ice Cream' }) });
+check('By city shows a place\'s address and a pin that opens it in Google Maps',
+  (await snow.locator('.city-address').textContent()) === '📍 No. 1, Ximen Rd, West Central District' &&
+  (await snow.locator('a.map-link').getAttribute('href')) === 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent('Snow King Ice Cream, No. 1, Ximen Rd, West Central District'),
+  await snow.textContent());
+const noAddress = page.locator('#itineraryCities .city-item', { has: page.locator('strong', { hasText: 'Wanted Shop' }) });
+check('… a place with no address yet gets a pin that searches by its name and city',
+  (await noAddress.locator('a.map-link').getAttribute('href')) === 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent('Wanted Shop, Taipei, Taiwan'));
+await page.click('[data-itinerary-view="days"]');
+const snowStop = page.locator('#itineraryDays .stop', { has: page.locator('h4', { hasText: 'Snow King Ice Cream' }) });
+await snowStop.screenshot({ path: '/tmp/clipatlas-stop-address.png' });
+check('a stop in Days shows its address with a Map link', /^📍 No\. 1, Ximen Rd, West Central District Map ↗$/.test((await snowStop.locator('.stop-address').textContent()).trim()),
+  await snowStop.locator('.stop-address').textContent());
+await page.click('[data-itinerary-view="cities"]');
+await page.click('#itineraryCities .city-unknown summary');
+const fill = page.locator('#itineraryCities .city-unknown [data-city-fill]').first();
+await page.locator('#itineraryCities .city-unknown').screenshot({ path: '/tmp/clipatlas-itinerary-unknown.png' });
+await fill.fill('Taoyuan'); await fill.press('Enter');
+check('a city typed next to a clip with none moves it into that city',
+  await page.locator('#itineraryCities .city-panel[data-city-key="taoyuan"] .city-item strong', { hasText: 'Airport tips' }).count() === 1 && /^Airport tips is in Taoyuan now\./.test(await page.textContent('#toast')),
+  await page.textContent('#toast'));
+await page.click('[data-itinerary-view="days"]');
+await page.locator('#itineraryDays .stop', { has: page.locator('h4', { hasText: 'Airport tips' }) }).locator('[data-action="edit-item"]').click();
+check('✎ Edit on a stop opens the clip with its city ready to change', await page.isVisible('#editDialog[open]') &&
+  await page.evaluate(() => document.activeElement.name) === 'city' && await page.inputValue('#editForm [name="city"]') === 'Taoyuan');
+await page.click('#cancelEdit');
+await page.click('[data-itinerary-view="cities"]');
+await page.click('#itineraryCities .city-unknown summary').catch(() => {});
 
 // A phone: nothing wider than the screen, in either view.
 await page.setViewportSize({ width: 390, height: 844 });

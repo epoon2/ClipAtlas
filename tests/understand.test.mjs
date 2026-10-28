@@ -100,10 +100,13 @@ test('a look reply is split into what it shows, the text on it and who posted it
 });
 
 test('decide also lists every place the clip names, checked', async () => {
-  const places = [{ name: ' Lin Dong Fang ', type: 'Food', city: 'Taipei', note: 'beef noodles' }, { name: '' }, 'bad', { name: 'Raohe', type: 'food' }];
+  const places = [{ name: ' Lin Dong Fang ', type: 'Food', city: 'Taipei', address: ' No. 322, Section 2,  Bade Rd ', note: 'beef noodles' }, { name: '' }, 'bad', { name: 'Raohe', type: 'food' }];
   const r = await understandClip(request(), fakeAI({ reply: JSON.stringify({ ...ANSWER, places }) }));
-  assert.deepEqual(r.places, [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: '', note: 'beef noodles' }, { name: 'Raohe', type: 'food', city: '', country: '', note: '' }]);
+  assert.deepEqual(r.places, [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: '', address: 'No. 322, Section 2, Bade Rd', note: 'beef noodles' },
+    { name: 'Raohe', type: 'food', city: '', country: '', address: '', note: '' }]);
   assert.match(buildPrompt(CATEGORIES, 'x', 'y'), /"places": \[every place the video names/);
+  assert.match(buildPrompt(CATEGORIES, 'x', 'y'), /"address": "its street address only if said or shown/, 'an address only when said or shown');
+  assert.match(buildPrompt(CATEGORIES, 'x', 'y'), /Never guess a place, city, address or name/);
 });
 
 test('look, then decide: what each sheet shows goes to the text model with the transcript, in JSON mode', async () => {

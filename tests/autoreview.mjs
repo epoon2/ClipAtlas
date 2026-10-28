@@ -132,7 +132,7 @@ globalThis.fetch = async (url, init) => {
   return googleJSON(200, { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify({ transcript: said ? 'the best beef noodles in taipei' : '',
     on_screen_text: 'BEST BEEF NOODLES TAIPEI', shows: 'A bowl of noodles.', creator: '@noodle.fan', title: 'Gemini noodles', summary: 'A noodle shop.',
     place: 'Lin Dong Fang', city: 'Taipei', country: 'Taiwan', category: 'Food', tags: ['noodles'],
-    places: [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: 'Taiwan', note: 'beef noodle soup' }, { name: 'Raohe Night Market', type: 'food', city: 'Taipei', note: '' }] }) }] } }],
+    places: [{ name: 'Lin Dong Fang', type: 'food', city: 'Taipei', country: 'Taiwan', address: 'No. 322, Sec. 2, Bade Rd', note: 'beef noodle soup' }, { name: 'Raohe Night Market', type: 'food', city: 'Taipei', note: '' }] }) }] } }],
     usageMetadata: { promptTokenCount: 2000, candidatesTokenCount: 150 } });
 };
 
@@ -385,7 +385,7 @@ check('each request carried the whole clip\'s sound (16 kHz WAV) and its screens
   gemini.calls.every(c => c.key === 'test-key' && c.categories.includes('Food') && /Its sound is (not )?attached/.test(c.prompt)), JSON.stringify(gemini.calls.map(c => [c.seconds.toFixed(1), c.images.length])));
 const gFound = await page.$$eval('#autoResults details .found', els => els.map(e => e.textContent));
 check('what Gemini found shows in the list: its places with their notes, what was heard, and the new places',
-  gFound.length === 3 && gFound.every(t => /Lin Dong Fang · Taipei — beef noodle soup/.test(t) && /Raohe Night Market/.test(t) && /Filled in: .*2 new places/.test(t)) &&
+  gFound.length === 3 && gFound.every(t => /Lin Dong Fang · Taipei — beef noodle soup 📍 No\. 322, Sec\. 2, Bade Rd/.test(t) && /Raohe Night Market/.test(t) && /Filled in: .*2 new places/.test(t)) &&
   gFound.filter(t => /Heard “the best beef noodles in taipei”/.test(t)).length === 2, JSON.stringify(gFound));
 const offer = page.locator('#autoResults .found-suggest');
 check('a clip in another category: the AI\'s choice is offered, not made', await offer.count() === 1 && new RegExp(`would file it under 🍜 Food; it stays in ${otherCategory}`).test(await offer.textContent()),
