@@ -722,3 +722,88 @@ test('downloads anyone can open: a web page and a spreadsheet, both safe',()=>{
  assert.ok(C.topicHtml(topic,'Cards',[r]).includes('<td>Chase → Hyatt 1:1</td><td class="n">2</td>'));
  assert.equal(C.topicCsv(topic,[r]).split('\r\n')[1],'Transfers,Chase → Hyatt 1:1,2,Night <b>market</b>,https://www.tiktok.com/@a/video/7345678901234567891');
 });
+test('merging two people\'s edits: item by item, field by field',()=>{
+ const a={id:'a',title:'Raohe',notes:'',city:'Taipei'},b={id:'b',title:'Shilin',notes:'',city:'Taipei'},c={id:'c',title:'Jiufen',notes:'',city:'Jiufen'};
+ const base={version:1,records:[a,b,c],collections:['Taiwan'],plan:[{id:'p1',recordId:'a',day:1,note:''},{id:'p2',recordId:'b',day:2,note:''}],tripTitle:'Taiwan',dayCities:{1:['Taipei']}};
+ const mine={...base,records:[{...a,notes:'pepper buns'},b,c,{id:'d',title:'Tainan beef soup'}],collections:['Taiwan','Food'],plan:[base.plan[1],base.plan[0]]};
+ const theirs={...base,records:[{...a,city:'Taipei City'},b],tripTitle:'Taiwan 2027',dayCities:{1:['Taipei'],2:['Tainan']},plan:[...base.plan,{id:'p3',recordId:'c',day:3,note:''}]};
+ const out=C.mergeStates(base,mine,theirs);
+ assert.deepEqual(out.records.map(r=>r.id),['a','b','d'],'their delete of c is kept, my new d is added');
+ assert.deepEqual([out.records[0].notes,out.records[0].city],['pepper buns','Taipei City'],'two people editing different fields of one item both win');
+ assert.deepEqual(out.collections,['Taiwan','Food']);
+ assert.equal(out.tripTitle,'Taiwan 2027');
+ assert.deepEqual(out.dayCities,{1:['Taipei'],2:['Tainan']});
+ assert.deepEqual(out.plan.map(p=>p.id),['p2','p1','p3'],'my reorder wins; their new stop goes at the end');
+ const both=C.mergeStates(base,{...base,tripTitle:'Mine'},{...base,tripTitle:'Theirs'});
+ assert.equal(both.tripTitle,'Mine','the same field changed by both: this browser wins');
+ const edited=C.mergeStates(base,{...base,records:[a,c]},{...base,records:[a,{...b,notes:'go at 6'},c]});
+ assert.deepEqual(edited.records.map(r=>r.id),['a','b','c'],'an edit beats a delete');
+ assert.equal(C.mergeStates(base,base,theirs),theirs,'nothing changed here: take theirs as it is');
+ assert.equal(C.stableJson({b:1,a:[{d:1,c:2}]}),C.stableJson({a:[{c:2,d:1}],b:1}));
+});
+test('view-only links show only what is shared, and notes only when asked',()=>{
+ const t=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Night markets',category:'Food',collections:['Taiwan'],notes:'my secret tip',
+  places:[{name:'Raohe Night Market',type:'food',city:'Taipei',country:'Taiwan',note:'pepper buns'}]});
+ t.auto={status:'understood',summary:'Two night markets in Taipei.',transcript:'everything said',onScreen:'all the text'};
+ const page=C.createRecord({kind:'link',url:'https://guide.example/taipei',title:'48 hours',body:'the whole page text',collections:['Taiwan','Food']});
+ const note=C.createRecord({kind:'note',title:'From Ann',body:'Try the oyster omelet',collections:['Taiwan']});
+ const other=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567892',title:'Tokyo ramen',collections:['Japan']});
+ const state={version:1,records:[t,page,note,other],collections:['Taiwan','Japan','Food'],categories:[{name:'Food',emoji:'🍜'},{name:'Hotels',emoji:'🛏️'}],
+  plan:[{id:'s1',recordId:t.id,placeId:t.places[0].id,day:2,note:'dinner'},{id:'s2',recordId:other.id,day:9,note:''}],tripTitle:'Asia',dayCount:10,dayCities:{2:['Taipei']},
+  reports:{Taiwan:{at:'2026-10-29T00:00:00Z',model:'m',count:3,summary:'s',groups:[{name:'Food',points:[{text:'Raohe is good',ids:[t.id,other.id]}]}]}},
+  collectionInfo:{Taiwan:{kind:'trip',about:'spring trip',groups:[]}}};
+ const v=C.shareView(state,{kind:'collection',collection:'Taiwan',owner:'Ethan'});
+ assert.equal(v.title,'Taiwan');assert.equal(v.owner,'Ethan');
+ assert.deepEqual(v.records.map(r=>r.title),['Night markets','48 hours','From Ann'],'only the collection\'s items');
+ const json=JSON.stringify(v);
+ for(const secret of ['my secret tip','everything said','all the text','the whole page text','Try the oyster omelet','Tokyo'])assert.ok(!json.includes(secret),secret+' is not shared');
+ assert.equal(v.records[0].summary,'Two night markets in Taipei.');
+ assert.equal(v.records[0].places[0].note,'pepper buns');
+ assert.deepEqual(v.categories,[{name:'Food',emoji:'🍜'}]);
+ assert.deepEqual(v.reports.Taiwan.groups[0].points[0].ids,[t.id],'research points name only shared items');
+ assert.equal(v.plan.length,0);assert.equal(v.tripTitle,undefined);
+ const withNotes=C.shareView(state,{kind:'collection',collection:'Taiwan',includeNotes:true});
+ assert.equal(withNotes.records[0].notes,'my secret tip');assert.equal(withNotes.records[2].body,'Try the oyster omelet');
+ assert.ok(!JSON.stringify(withNotes).includes('the whole page text'),'page text is never shared');
+ const trip=C.shareView(state,{kind:'itinerary'});
+ assert.equal(trip.title,'Asia');assert.deepEqual(trip.records.map(r=>r.title),['Night markets','Tokyo ramen'],'an itinerary shares the items its stops come from');
+ assert.deepEqual(trip.plan.map(p=>[p.day,p.note]),[[2,'dinner'],[9,'']]);assert.deepEqual(trip.dayCities,{2:['Taipei']});
+});
+test('a collection moves into a shared space, and back',()=>{
+ const only=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Night markets',collections:['Taiwan']});
+ const both=C.createRecord({kind:'link',url:'https://guide.example/taipei',title:'48 hours',collections:['Taiwan','Food']});
+ const away=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567892',title:'Tokyo ramen',collections:['Japan']});
+ const state={version:1,records:[only,both,away],collections:['Taiwan','Japan','Food'],categories:[{name:'Food',emoji:'🍜'}],settings:{purpose:'travel'},
+  plan:[{id:'s1',recordId:only.id,day:1,note:''},{id:'s2',recordId:both.id,day:2,note:''},{id:'s3',recordId:away.id,day:3,note:''}],
+  tripTitle:'Taiwan',dayCount:5,dayCities:{1:['Taipei']},questions:[{id:'q1',scope:'collection:Taiwan',q:'x',a:'y'},{id:'q2',scope:'',q:'x',a:'y'}],
+  reports:{Taiwan:{groups:[]}},collectionInfo:{Taiwan:{kind:'trip'}},placeAliases:{}};
+ const {space,rest,moved,copied,stops}=C.spaceFromCollection(state,'Taiwan',{takePlan:true});
+ assert.deepEqual([moved,copied,stops],[1,1,2]);
+ assert.deepEqual(space.records.map(r=>[r.title,r.collections]),[['Night markets',['Taiwan']],['48 hours',['Taiwan']]]);
+ assert.deepEqual(space.plan.map(p=>p.id),['s1','s2']);assert.equal(space.tripTitle,'Taiwan');assert.deepEqual(space.questions.map(q=>q.id),['q1']);
+ assert.equal(space.settings,undefined,'settings stay personal');assert.ok(space.reports.Taiwan&&space.collectionInfo.Taiwan);
+ assert.deepEqual(rest.records.map(r=>[r.title,r.collections]),[['48 hours',['Food']],['Tokyo ramen',['Japan']]],'an item also in Food stays there');
+ assert.deepEqual(rest.collections,['Japan','Food']);assert.deepEqual(rest.plan.map(p=>p.id),['s3']);
+ assert.ok(!rest.reports.Taiwan&&!rest.collectionInfo.Taiwan);assert.deepEqual(rest.questions.map(q=>q.id),['q2']);
+ const kept=C.spaceFromCollection(state,'Taiwan',{takePlan:false});
+ assert.deepEqual([kept.space.plan.length,kept.rest.plan.map(p=>p.id)],[0,['s2','s3']],'without the itinerary, stops of items that stay are kept');
+ const back=C.spaceIntoLibrary(rest,{...space,records:[...space.records,C.createRecord({kind:'note',title:'From Ann',body:'oyster omelet',collections:['Taiwan']})]});
+ assert.deepEqual(back.records.map(r=>[r.title,r.collections]),[['48 hours',['Food','Taiwan']],['Tokyo ramen',['Japan']],['Night markets',['Taiwan']],['From Ann',['Taiwan']]]);
+ assert.deepEqual(back.plan.map(p=>p.id),['s3','s1','s2']);assert.ok(back.collections.includes('Taiwan'));assert.ok(back.reports.Taiwan);
+});
+test('merging keeps both people\'s new categories and research groups (lists keyed by name)',()=>{
+ const base={categories:[{name:'Food',emoji:'🍜'}]};
+ const out=C.mergeStates(base,{categories:[{name:'Food',emoji:'🍜'},{name:'Bars',emoji:'🍸'}]},{categories:[{name:'Food',emoji:'🍲'},{name:'Museums',emoji:'🏛️'}]});
+ assert.deepEqual(out.categories.map(c=>c.name+c.emoji),['Food🍲','Museums🏛️','Bars🍸']);
+});
+test('a view-only page leaves out other collections\' place names and a note\'s summary without notes',()=>{
+ const shown=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Night markets',collections:['Taiwan'],places:[{name:'Raohe Night Market',type:'food',city:'Taipei'}]});
+ const note=C.createRecord({kind:'note',title:'From Mei',body:'secret body',collections:['Taiwan']});note.auto={status:'understood',summary:'summary of the secret body'};
+ const state={records:[shown,note],placeAliases:{'taipei|raohe street night market':'Raohe Night Market','tokyo|secret bar':'Secret Bar Tokyo'}};
+ const v=C.shareView(state,{kind:'collection',collection:'Taiwan'});
+ assert.deepEqual(Object.values(v.placeAliases),[]);
+ const withAlias=C.shareView({...state,placeAliases:{'taipei|raohenightmarket':'Raohe Night Market','tokyo|secretbar':'Secret Bar Tokyo'}},{kind:'collection',collection:'Taiwan'});
+ assert.deepEqual(Object.values(withAlias.placeAliases),['Raohe Night Market'],'only names of places on the page');
+ assert.equal(v.records[1].summary,'');
+ assert.equal(C.shareView(state,{kind:'collection',collection:'Taiwan',includeNotes:true}).records[1].summary,'summary of the secret body');
+});

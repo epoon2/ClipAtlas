@@ -1,0 +1,26 @@
+/* The view-only page (/s/<token>): readable on a phone, prints cleanly. */
+:root{--ink:#19343a;--muted:#5f7a73;--line:#e1e9e4;--soft:#f3f7f4;--brand:#173a3e;--accent:#1f6f5c;--chip:#ecf3ec;--paper:#fff;--bg:#f7f6f2;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg);font-size:15px;line-height:1.55}
+*{box-sizing:border-box}body{margin:0;background:var(--bg)}a{color:var(--accent)}a:focus-visible,button:focus-visible{outline:3px solid #6bb8a4;outline-offset:2px}
+.v-top{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--brand);color:#f1f6f1}
+.v-brand{color:#fff;text-decoration:none;font-weight:800;letter-spacing:-.02em;font-size:18px;display:flex;align-items:center;gap:8px}.v-mark{background:#b8eee0;color:var(--brand);width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:18px}
+.v-badge{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;background:#31565a;border-radius:20px;padding:5px 10px}
+.v-main{max-width:1040px;margin:0 auto;padding:22px 16px 40px}
+.v-head h1{font-size:clamp(26px,5vw,40px);letter-spacing:-.04em;line-height:1.15;margin:4px 0 6px}.v-kicker{font-size:11px;font-weight:800;letter-spacing:.14em;color:#458679;text-transform:uppercase}
+.v-meta{color:var(--muted);font-size:13px;margin:0 0 16px}.v-about{background:var(--soft);border-radius:10px;padding:10px 14px;margin:0 0 16px}
+.v-tabs{display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin:8px 0 18px}
+.v-tabs button{border:0;background:none;font:inherit;font-weight:750;color:var(--muted);padding:10px 12px;border-bottom:3px solid transparent;cursor:pointer}.v-tabs button[aria-selected="true"]{color:var(--brand);border-bottom-color:var(--accent)}
+.v-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
+.v-card{background:var(--paper);border:1px solid var(--line);border-radius:13px;padding:14px 15px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.v-cat{font-size:10px;font-weight:850;letter-spacing:.08em;text-transform:uppercase;color:#4e9788}.v-card h3{margin:0;font-size:16px;letter-spacing:-.02em;line-height:1.35;overflow-wrap:anywhere}
+.v-card p{margin:0;color:#4f6a63;font-size:13px;overflow-wrap:anywhere}.v-where{color:var(--muted);font-size:12px}
+.v-places{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 0;padding:0;list-style:none}.v-places li{background:var(--chip);color:#3c6e62;border-radius:6px;padding:3px 7px;font-size:12px}
+.v-note{background:#fff8e8;border-radius:8px;padding:7px 9px;font-size:13px;white-space:pre-wrap}.v-open{font-size:13px;font-weight:700;margin-top:auto;padding-top:4px}
+.v-panel h2{font-size:21px;letter-spacing:-.03em;margin:22px 0 8px;padding-top:12px;border-top:1px solid var(--line)}.v-panel h2:first-child{border-top:0;margin-top:0;padding-top:0}.v-panel h2 small,.v-panel h3 small{color:var(--muted);font-weight:500;font-size:13px}
+.v-panel h3{font-size:15px;margin:14px 0 6px;color:#2f5f55}
+.v-panel table{width:100%;border-collapse:collapse;margin:4px 0 14px;font-size:14px;background:var(--paper);border-radius:10px;overflow:hidden}
+.v-panel th,.v-panel td{text-align:left;vertical-align:top;padding:8px 9px;border-bottom:1px solid var(--line)}.v-panel th{background:#f1f6f3;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#41605a}
+.v-panel td.n{text-align:right;white-space:nowrap;font-weight:700}.v-panel .summary{background:var(--soft);border-radius:8px;padding:10px 14px}.v-panel .top{background:#fff7e6;border:1px solid #f0dcae;border-radius:8px;padding:8px 12px}.v-panel small{color:var(--muted)}
+.v-empty,.v-loading,.v-error{background:var(--paper);border:1px dashed #bfccc3;border-radius:13px;padding:30px 18px;text-align:center;color:var(--muted)}.v-error h1{color:var(--ink);font-size:22px;margin:0 0 6px}
+.v-foot{max-width:1040px;margin:0 auto;padding:0 16px 30px;color:var(--muted);font-size:13px}
+@media (max-width:640px){.v-panel table,.v-panel thead,.v-panel tbody,.v-panel tr,.v-panel th,.v-panel td{display:block;width:100%}.v-panel thead{display:none}.v-panel tr{border-bottom:1px solid var(--line);padding:6px 0}.v-panel td{border:0;padding:3px 10px}.v-panel td.n{text-align:left}.v-panel td[data-label]::before{content:attr(data-label) ": ";font-weight:700;color:var(--muted);font-size:12px}}
+@media print{.v-top,.v-tabs,.v-foot{display:none}.v-main{padding:0}.v-panel[hidden]{display:block!important}body{background:#fff}}

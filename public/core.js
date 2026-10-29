@@ -1582,7 +1582,8 @@
   const fromLinks = sources => sources.map(x => linkTo(x.url, x.title)).join(', ');
 
   /** Places by city as a document: each city, each kind, a table of places with how many sources name each. */
-  function reportHtml(report, title) {
+  function reportHtml(report, title) { return htmlDocument(title, reportBody(report)); }
+  function reportBody(report) {
     const cities = report.cities.filter(c => c.name).length;
     let body = `<p class="summary">${report.places} places in ${cities} ${cities === 1 ? 'city' : 'cities'}. The number by each place is how many of your saved sources name it.${report.unnamed ? ` ${report.unnamed} saved ${report.unnamed === 1 ? 'item names' : 'items name'} no place.` : ''}</p>`;
     if ((report.top || []).length) body += `<p class="top"><strong>Most mentioned:</strong> ${report.top.map(t => `${esc(t.name)} (${t.count})`).join(', ')}</p>`;
@@ -1598,7 +1599,7 @@
         body += '</tbody></table>';
       }
     }
-    return htmlDocument(title, body);
+    return body;
   }
   function reportCsv(report) {
     const rows = [];
@@ -1608,7 +1609,8 @@
     return csvDocument(['City', 'Country', 'Kind', 'Place', 'Sources', 'Also called', 'What to get or do', 'Address', 'Google Maps', 'From', 'Links'], rows);
   }
   /** Research by topic as a document: each group, a table of points with how many sources say each. */
-  function topicHtml(report, title, records = []) {
+  function topicHtml(report, title, records = []) { return htmlDocument(title, topicBody(report, records), { made: report.at || isoNow() }); }
+  function topicBody(report, records = []) {
     const byId = new Map(records.map(r => [r.id, r]));
     let body = report.summary ? `<p class="summary">${esc(report.summary)}</p>` : '';
     for (const g of report.groups) {
@@ -1619,7 +1621,7 @@
       }
       body += '</tbody></table>';
     }
-    return htmlDocument(title, body, { made: report.at || isoNow() });
+    return body;
   }
   function topicCsv(report, records = []) {
     const byId = new Map(records.map(r => [r.id, r]));
@@ -1645,6 +1647,9 @@
     return [...days.entries()].sort((a, b) => a[0] - b[0]).map(([day, stops]) => ({ day, cities: ((dayCities || {})[day] || []).map(cityName).filter(Boolean), stops }));
   }
   function planHtml(plan, records, title, dayCities = {}) {
+    return htmlDocument(safeString(title) || 'My trip', planBody(plan, records, dayCities) + '<p><small>Locations, opening hours and travel times have not been independently verified.</small></p>');
+  }
+  function planBody(plan, records, dayCities = {}) {
     let body = '';
     for (const d of planRows(plan, records, dayCities)) {
       body += `<h2>Day ${d.day}${d.cities.length ? ' · ' + esc(d.cities.join(', ')) : ''}</h2>`;
@@ -1657,11 +1662,166 @@
       });
       body += '</tbody></table>';
     }
-    return htmlDocument(safeString(title) || 'My trip', body + '<p><small>Locations, opening hours and travel times have not been independently verified.</small></p>');
+    return body;
   }
   function planCsv(plan, records, dayCities = {}) {
     const rows = planRows(plan, records, dayCities).flatMap(d => d.stops.map((s, i) => [d.day, d.cities.join(', '), i + 1, s.name, s.kind, s.what, s.city, s.country, s.address, s.map, s.plan, s.notes, s.from, s.url]));
     return csvDocument(['Day', 'Day cities', 'Order', 'Stop', 'Kind', 'What to get or do', 'City', 'Country', 'Address', 'Google Maps', 'Plan note', 'Your notes', 'From', 'Link'], rows);
   }
-  return { htmlDocument, csvDocument, reportHtml, reportCsv, topicHtml, topicCsv, planRows, planHtml, planCsv, placeNameKey, aliasKey, cleanAliases, samePlacesPrompt, samePlacesRequest, readSamePlaces, mergePlaces, separatePlace, COLLECTION_KINDS, suggestedGroups, cleanGroups, cleanCollectionInfo, collectionLayout, groupsPrompt, groupsRequest, readGroups, topicReportPrompt, topicReportRequest, readTopicReport, cleanReports, topicMarkdown, PLAN_TIMES, PLAN_TIME_LABELS, planAIPrompt, planAIRequest, readPlanAnswer, planFromAnswer, placeStops, placeReport, reportMarkdown, mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+
+  /* ---- Sharing: view-only links, shared spaces, and merging two people's edits ---- */
+  const isPlain = v => !!v && typeof v === 'object' && !Array.isArray(v);
+  /** JSON with object keys sorted, so two equal values always compare equal. */
+  function stableJson(v) {
+    if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+    if (isPlain(v)) return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}';
+    return v === undefined ? 'null' : JSON.stringify(v);
+  }
+  const sameValue = (a, b) => stableJson(a) === stableJson(b);
+  // Lists of items keyed by id (records, stops), or by name (categories, research groups).
+  const keyedBy = (list, key) => Array.isArray(list) && list.every(x => isPlain(x) && typeof x[key] === 'string' && x[key])
+    && new Set(list.map(x => x[key])).size === list.length;
+  function mergeById(base, mine, theirs, key = 'id') {
+    const k = x => x[key];
+    const B = new Map(base.map(x => [k(x), x])), M = new Map(mine.map(x => [k(x), x])), T = new Map(theirs.map(x => [k(x), x]));
+    // Order: whoever reordered wins; the other side's new items go at the end.
+    const mineMoved = !sameValue(mine.map(k).filter(id => B.has(id)), base.map(k).filter(id => M.has(id)));
+    const [first, second] = mineMoved ? [mine, theirs] : [theirs, mine];
+    const order = uniq([...first.map(k), ...second.map(k)]);
+    const out = [];
+    for (const id of order) {
+      const b = B.get(id), m = M.get(id), t = T.get(id);
+      if (m === undefined && t === undefined) continue;
+      if (m === undefined) { if (b === undefined || !sameValue(t, b)) out.push(t); continue; }   // they added or edited it: keep it
+      if (t === undefined) { if (b === undefined || !sameValue(m, b)) out.push(m); continue; }
+      out.push(mergeValues(b, m, t));
+    }
+    return out;
+  }
+  function mergeList(base, mine, theirs) {
+    const b = new Set(base.map(stableJson)), m = new Set(mine.map(stableJson)), t = new Set(theirs.map(stableJson)), out = [], seen = new Set();
+    for (const v of [...mine, ...theirs]) {
+      const k = stableJson(v);
+      if (seen.has(k) || (b.has(k) && (!m.has(k) || !t.has(k)))) continue;   // removed by either side
+      seen.add(k); out.push(v);
+    }
+    return out;
+  }
+  /** Three-way merge of a saved value: what both started from (base), this browser's copy (mine) and
+      the saved copy someone else changed (theirs). Lists of items with ids merge item by item and field
+      by field; plain lists merge as sets; when both changed the same field, this browser's copy wins. */
+  function mergeValues(base, mine, theirs) {
+    if (sameValue(mine, base)) return theirs;
+    if (sameValue(theirs, base) || sameValue(mine, theirs)) return mine;
+    if (Array.isArray(mine) && Array.isArray(theirs)) {
+      const b = Array.isArray(base) ? base : [];
+      for (const key of ['id', 'name']) if (keyedBy(mine, key) && keyedBy(theirs, key) && keyedBy(b, key)) return mergeById(b, mine, theirs, key);
+      if ([...mine, ...theirs, ...b].every(x => !isPlain(x) && !Array.isArray(x))) return mergeList(b, mine, theirs);
+      return mine;
+    }
+    if (isPlain(mine) && isPlain(theirs)) {
+      const b = isPlain(base) ? base : {}, out = {};
+      for (const k of uniq([...Object.keys(mine), ...Object.keys(theirs)])) {
+        const v = mergeValues(b[k], mine[k], theirs[k]);
+        if (v !== undefined) out[k] = v;
+      }
+      return out;
+    }
+    return mine;
+  }
+  const mergeStates = (base, mine, theirs) => mergeValues(base || {}, mine, theirs);
+
+  const SHARE_KINDS = ['collection', 'itinerary', 'space'];
+  const httpUrl = u => /^https?:\/\//i.test(safeString(u)) ? safeString(u).slice(0, 2000) : '';
+  /** What a view-only link shows, and nothing more: no transcripts, page text, screenshots' text, or (unless
+      asked) the person's own notes. kind: a collection of the library, its itinerary, or a whole shared space. */
+  function shareView(state, { kind = 'collection', collection = '', includeNotes = false, owner = '', title = '', updatedAt = '' } = {}) {
+    kind = SHARE_KINDS.includes(kind) ? kind : 'collection';
+    const all = Array.isArray(state && state.records) ? state.records : [];
+    let records, plan = [];
+    if (kind === 'collection') records = all.filter(r => (r.collections || []).includes(collection));
+    else {
+      plan = prunePlan(state.plan, all);
+      const used = new Set(plan.map(p => p.recordId));
+      records = kind === 'space' ? all : all.filter(r => used.has(r.id));
+    }
+    const names = kind === 'collection' ? [collection] : kind === 'space' ? (state.collections || []).filter(n => all.some(r => (r.collections || []).includes(n))) : [];
+    const ids = new Set(records.map(r => r.id)), cats = new Set(records.map(r => r.category));
+    const view = {
+      kind, title: safeString(title) || (kind === 'collection' ? collection : safeString(state.tripTitle) || 'My trip'),
+      owner: safeString(owner).slice(0, 80), updatedAt: safeString(updatedAt).slice(0, 40), includeNotes: !!includeNotes,
+      categories: (state.categories || []).filter(c => c && cats.has(c.name)).map(c => ({ name: safeString(c.name), emoji: safeString(c.emoji) })),
+      collections: names,
+      records: records.map(r => {
+        const k = ITEM_KINDS.includes(r.kind) ? r.kind : 'tiktok';
+        return { id: r.id, kind: k, url: k === 'note' ? '' : httpUrl(r.url), title: safeString(r.title).slice(0, 300), creator: safeString(r.creator).slice(0, 80),
+          category: safeString(r.category) || 'Unsorted', place: safeString(r.place).slice(0, 120), city: safeString(r.city).slice(0, 60), country: safeString(r.country).slice(0, 60),
+          tags: (r.tags || []).map(safeString).filter(Boolean).slice(0, 20), places: cleanPlaces(r.places),
+          summary: k === 'note' && !includeNotes ? '' : safeString(r.auto && r.auto.summary).slice(0, 240),
+          collections: (r.collections || []).filter(n => names.includes(n)),
+          notes: includeNotes ? safeString(r.notes).slice(0, 2000) : '', body: includeNotes && k === 'note' ? safeString(r.body).slice(0, 4000) : '' };
+      }),
+      plan: plan.filter(p => ids.has(p.recordId)).map(p => ({ id: safeString(p.id), recordId: p.recordId, placeId: safeString(p.placeId) || undefined,
+        day: Math.max(1, Math.min(MAX_DAYS, Number(p.day) || 1)), note: safeString(p.note).slice(0, 300) })),
+      collectionInfo: {}, reports: {}, placeAliases: {}
+    };
+    // Other names for places: only those of places on this page.
+    const shown = new Set(tripItems(records).map(it => aliasKey(it.city, it.name))), aliases = cleanAliases(state.placeAliases);
+    for (const key of Object.keys(aliases)) if (shown.has(key)) view.placeAliases[key] = aliases[key];
+    if (kind !== 'collection') Object.assign(view, { tripTitle: safeString(state.tripTitle) || 'My trip', dayCount: cleanDayCount(state.dayCount), dayCities: cleanDayCities(state.dayCities, cleanDayCount(state.dayCount)) });
+    const info = cleanCollectionInfo(state.collectionInfo), reports = cleanReports(state.reports);
+    for (const n of names) {
+      if (info[n]) view.collectionInfo[n] = info[n];
+      if (reports[n]) view.reports[n] = { ...reports[n], groups: reports[n].groups.map(g => ({ ...g, points: g.points.map(pt => ({ ...pt, ids: pt.ids.filter(id => ids.has(id)) })).filter(pt => pt.ids.length) })) };
+    }
+    return view;
+  }
+
+  /** Move a collection out of the library into a new shared space (a library of its own). Items only in this
+      collection move; items also in another collection stay and a copy goes along. With takePlan, the
+      itinerary's stops for these items move too, with the trip's name, days and cities. */
+  function spaceFromCollection(state, name, { takePlan = true } = {}) {
+    const records = state.records || [], inCol = records.filter(r => (r.collections || []).includes(name));
+    const ids = new Set(inCol.map(r => r.id)), only = new Set(inCol.filter(r => r.collections.length === 1).map(r => r.id));
+    const stops = (state.plan || []).filter(p => ids.has(p.recordId));
+    const scoped = q => safeString(q.scope) === 'collection:' + name;
+    const without = (obj, key) => { const o = { ...(obj || {}) }; delete o[key]; return o; };
+    const space = {
+      version: 1, records: inCol.map(r => ({ ...r, collections: [name] })), collections: [name],
+      plan: takePlan ? stops : [], tripTitle: takePlan && stops.length ? state.tripTitle || name : name, dayCount: takePlan && stops.length ? state.dayCount : 7,
+      dayCities: takePlan && stops.length ? state.dayCities || {} : {}, questions: (state.questions || []).filter(scoped),
+      categories: state.categories, collectionInfo: (state.collectionInfo || {})[name] ? { [name]: state.collectionInfo[name] } : {},
+      reports: (state.reports || {})[name] ? { [name]: state.reports[name] } : {}, placeAliases: state.placeAliases || {}
+    };
+    if (space.categories === undefined) delete space.categories;
+    const rest = { ...state,
+      records: records.filter(r => !only.has(r.id)).map(r => ids.has(r.id) ? { ...r, collections: r.collections.filter(c => c !== name) } : r),
+      collections: (state.collections || []).filter(c => c !== name),
+      plan: (state.plan || []).filter(p => takePlan ? !ids.has(p.recordId) : !only.has(p.recordId)),
+      questions: (state.questions || []).filter(q => !scoped(q)),
+      collectionInfo: without(state.collectionInfo, name), reports: without(state.reports, name) };
+    return { space, rest, moved: only.size, copied: inCol.length - only.size, stops: stops.length };
+  }
+  /** A shared space back into a library (when its owner stops sharing it): its items, collections, research
+      and itinerary stops are added; an item the library already has gets the space's version. */
+  function spaceIntoLibrary(library, space) {
+    const lib = { ...library }, have = new Map((lib.records || []).map(r => [r.id, r]));
+    const records = [...(lib.records || [])];
+    for (const r of space.records || []) {
+      if (have.has(r.id)) {   // the space's version, keeping your own notes when the space has none
+        const mine = have.get(r.id), i = records.findIndex(x => x.id === r.id);
+        records[i] = { ...r, notes: safeString(r.notes) || mine.notes || '', collections: uniq([...(mine.collections || []), ...(r.collections || [])]) };
+      }
+      else records.push(r);
+    }
+    const ids = new Set(records.map(r => r.id)), planned = new Set((lib.plan || []).map(p => p.id));
+    const plan = [...(lib.plan || []), ...(space.plan || []).filter(p => !planned.has(p.id) && ids.has(p.recordId))];
+    const fresh = !(lib.plan || []).length && (space.plan || []).length;
+    return { ...lib, records, plan, collections: uniq([...(lib.collections || []), ...(space.collections || [])]),
+      ...(fresh ? { tripTitle: space.tripTitle, dayCount: space.dayCount, dayCities: space.dayCities } : {}),
+      questions: [...(lib.questions || []), ...(space.questions || [])].slice(-ASK_KEEP),
+      collectionInfo: { ...(lib.collectionInfo || {}), ...(space.collectionInfo || {}) }, reports: { ...(lib.reports || {}), ...(space.reports || {}) },
+      placeAliases: { ...(lib.placeAliases || {}), ...(space.placeAliases || {}) } };
+  }
+  return { stableJson, mergeValues, mergeStates, SHARE_KINDS, shareView, spaceFromCollection, spaceIntoLibrary, reportBody, topicBody, planBody, htmlDocument, csvDocument, reportHtml, reportCsv, topicHtml, topicCsv, planRows, planHtml, planCsv, placeNameKey, aliasKey, cleanAliases, samePlacesPrompt, samePlacesRequest, readSamePlaces, mergePlaces, separatePlace, COLLECTION_KINDS, suggestedGroups, cleanGroups, cleanCollectionInfo, collectionLayout, groupsPrompt, groupsRequest, readGroups, topicReportPrompt, topicReportRequest, readTopicReport, cleanReports, topicMarkdown, PLAN_TIMES, PLAN_TIME_LABELS, planAIPrompt, planAIRequest, readPlanAnswer, planFromAnswer, placeStops, placeReport, reportMarkdown, mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

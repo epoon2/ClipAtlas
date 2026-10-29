@@ -12,6 +12,10 @@
   let currentTab = 'library', activeCollection = '', editingId = null, saveTimer = null;
   let selecting = false; const selected = new Set();  // choosing many clips at once
   let toastTimer = null;
+  // Sharing: the shared space open now (null: your own library), your library while a space is open, the
+  // saved copy this browser last matched (to fold in someone else's changes), and the spaces you are in.
+  let space = null, personal = null, base = null, spaces = [], pollTimer = null, polling = false, pendingJoin = '';
+  const clone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
 
   function toast(message, action) {
     const el = $('#toast'); el.textContent = message; el.classList.toggle('with-action', !!action);
@@ -56,17 +60,34 @@
     }
   }
   let saveBusy = false, dirty = false, saveBlocked = false;
+  // What is saved: in a shared space, everything except your own settings.
+  const docSnapshot = () => { const s = clone(state); if (space) delete s.settings; return s; };
   async function persist() {
     dirty = true;
     if(saveBusy || saveBlocked) return;
     saveBusy = true;
+    let conflicts = 0;
     try {
       while(dirty && !saveBlocked) {
         dirty = false;
-        const snapshot = JSON.parse(JSON.stringify(state));
+        const snapshot = docSnapshot(), into = space;
         $('#saveStatus').textContent = 'Saving…';
-        await Cloud.save(snapshot);
-        $('#saveStatus').textContent = 'Saved to your account';
+        try {
+          if (into) { const r = await Cloud.saveSpace(into.id, snapshot, into.revision); into.revision = r.revision; }
+          else await Cloud.save(snapshot);
+          base = snapshot; conflicts = 0;
+        } catch (err) {
+          // Someone saved first (another person, tab or device): fold their changes in, then save again,
+          // waiting a little longer each time it happens again in a row.
+          if (err.status === 409 && conflicts < 12) {
+            if (conflicts++) await new Promise(r => setTimeout(r, Math.min(4000, 250 * conflicts) + Math.random() * 400));
+            await pullAndMerge(); dirty = true; continue;
+          }
+          if (into && err.status === 404) { lostSpace(err.message, snapshot); return; }
+          if (into && err.status === 403) { await pullAndMerge().catch(() => {}); toast(err.message); return; }
+          throw err;
+        }
+        $('#saveStatus').textContent = space ? 'Saved to the shared space' : 'Saved to your account';
       }
     } catch(err) {
       saveBlocked = true;
@@ -75,7 +96,12 @@
       $('#exportBackup').focus();
     } finally {saveBusy=false;}
   }
-  const commit = () => { render(); clearTimeout(saveTimer); saveTimer = setTimeout(()=>{saveTimer=null;persist();}, 120); };
+  const commit = () => {
+    if (space && space.role === 'view') {   // view-only: put back what is saved
+      setDoc(base); render(); toast('You can view this shared space but not change it. Ask its owner for edit access.'); return;
+    }
+    render(); clearTimeout(saveTimer); saveTimer = setTimeout(()=>{saveTimer=null;persist();}, 120);
+  };
   const download = (filename, text, mime) => {
     const blob = new Blob([text], {type:mime}); const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href=url; a.download=filename; a.style.display='none';
@@ -232,7 +258,7 @@
     const asPlaces=libraryView==='places',info=collInfo(activeCollection),layout=C.collectionLayout(info,records);
     for(const b of $$('[data-lib-view]')){const on=b.dataset.libView===libraryView;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));}
     $('[data-lib-view="places"]').textContent=layout==='places'?'📍 Places by city':'📋 Research by topic';
-    $('#collSetupBtn').hidden=!activeCollection;
+    $('#collSetupBtn').hidden=!activeCollection;$('#shareBtn').hidden=!activeCollection&&!space;
     $('#collSetupBanner').hidden=!activeCollection||!!info;
     if(activeCollection&&!info)$('#collSetupName').textContent=activeCollection;
     $('#clipGrid').hidden=asPlaces;$('#placesReport').hidden=!asPlaces;
@@ -674,6 +700,7 @@
     fillCategorySelect($('#categoryFilter'), true); fillCategorySelect($('#formCategory'), false); applyTabs();
     renderStats(); renderCollections(); renderAnalysisSummary(); renderReviewCount();
     if(currentTab==='library')renderLibrary(); else if(currentTab==='itinerary')renderItinerary(); else if(currentTab==='settings')renderSettings();
+    renderSharing();
   }
   // What the Edit dialog holds: a TikTok, a web page (its link and text) or a typed note.
   let editingKind='tiktok',editorReadAt='';
@@ -1414,7 +1441,7 @@
     try{
       stream.getVideoTracks()[0].addEventListener('ended',()=>{if(!auto)return;auto.stop=true;auto.ended=true;auto.finishClip?.('SHARING_STOPPED');});
       const ctx=new AudioContext();auto.ctx=ctx;
-      await ctx.audioWorklet.addModule('recorder.js');
+      await ctx.audioWorklet.addModule('/recorder.js');
       const source=ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
       const node=new AudioWorkletNode(ctx,'clipatlas-recorder');auto.node=node;
       const silent=ctx.createGain();silent.gain.value=0;
@@ -2116,6 +2143,333 @@
     });
     render();
   }
+  /* ---- Sharing: view-only links, shared spaces you edit with others, and keeping in step with them ---- */
+  // Make a saved document the one on screen: your library, or a shared space (with your own settings added).
+  function setDoc(doc) {
+    const d = clone(doc || {}) || {};
+    if (space) d.settings = clone((personal && personal.state.settings) || state.settings);
+    applyState(d);
+  }
+  // Someone else saved first: take the saved copy and fold this browser's changes into it.
+  async function pullAndMerge() {
+    let theirs;
+    if (space) { const r = await Cloud.loadSpace(space.id); Object.assign(space, r.space, { revision: r.revision }); theirs = r.state; }
+    else theirs = await Cloud.load();
+    setDoc(C.mergeStates(base, docSnapshot(), theirs)); base = clone(theirs);
+    document.body.classList.toggle('readonly', !!space && space.role === 'view');
+    render();
+  }
+  const editing = el => !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  function startPolling() { stopPolling(); pollTimer = setInterval(poll, 15000); }
+  function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+  // While a shared space is open, its saved copy is checked every 15 seconds (and when you come back to the
+  // tab), so other people's changes show up. Skipped while you type or a window is open.
+  async function poll() {
+    if (!space || document.hidden || saveBusy || saveTimer || dirty || polling || saveBlocked || auto) return;
+    if (editing(document.activeElement) || document.querySelector('dialog[open]:not(#shareDialog)')) return;
+    polling = true;
+    const id = space.id;
+    try {
+      const r = await Cloud.loadSpace(id, space.revision);
+      // Nothing new, an edit started meanwhile, or an answer older than your own last save.
+      if (!space || space.id !== id || r.unchanged || saveBusy || saveTimer || dirty || r.revision <= space.revision) return;
+      Object.assign(space, r.space, { revision: r.revision });
+      setDoc(C.mergeStates(base, docSnapshot(), r.state)); base = clone(r.state);
+      document.body.classList.toggle('readonly', space.role === 'view');
+      render();
+    } catch (err) { if (err.status === 404 && space && space.id === id) lostSpace(err.message); }
+    finally { polling = false; }
+  }
+  async function refreshSpaces() {
+    try { spaces = (await Cloud.spaces()).spaces || []; } catch (_) { spaces = spaces || []; }
+    if (space) { const now = spaces.find(s => s.id === space.id); if (now) Object.assign(space, { name: now.name, role: now.role, people: now.people }); }
+    renderSharing();
+  }
+  // Wait for every pending save. False when one failed (nothing is switched then).
+  async function flushSaves() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; dirty = true; }
+    for (let i = 0; i < 600 && !saveBlocked && (saveBusy || dirty); i++) {
+      if (saveBusy) await new Promise(r => setTimeout(r, 100)); else await persist();
+    }
+    if (saveBlocked) toast('Your last change did not save. Download a backup first.');
+    else if (saveBusy || dirty) toast('Still saving. Try again in a moment.');
+    return !saveBlocked && !saveBusy && !dirty;
+  }
+  function busyElsewhere() {
+    if (auto || analysisRunning) { toast('Stop the review or lookup that is running first.'); return true; }
+    return false;
+  }
+  async function openSpace(id) {
+    if (space && space.id === id) return;
+    const listed = spaces.find(s => s.id === id);
+    if (listed && listed.pending) {   // added by email: accept it first
+      if (!confirm(`${listed.owner} added you to “${listed.name}”, a shared space (you can ${listed.role === 'edit' ? 'edit' : 'view'} it). Open it now? (Cancel declines it.)`)) {
+        try { await Cloud.removePerson(id, (Cloud.user || {}).id); toast(`Declined “${listed.name}”.`); } catch (err) { toast(err.message); }
+        return refreshSpaces();
+      }
+      try { await Cloud.acceptSpace(id); listed.pending = false; } catch (err) { toast(err.message); return refreshSpaces(); }
+    }
+    if (busyElsewhere() || !(await flushSaves())) return;
+    let r; try { r = await Cloud.loadSpace(id); } catch (err) { toast(err.message); await refreshSpaces(); return; }
+    if (!space) personal = { state, base };
+    space = { ...r.space, revision: r.revision, people: (spaces.find(s => s.id === id) || {}).people || 1 };
+    setDoc(r.state); base = clone(r.state);
+    afterSwitch((state.collections || [])[0] || '');
+    startPolling();
+  }
+  async function openLibrary() {
+    if (!space) return;
+    if (busyElsewhere() || !(await flushSaves())) return;
+    stopPolling();
+    const settings = state.settings;
+    space = null; state = personal.state; base = personal.base; personal = null;
+    const changed = C.stableJson(settings || {}) !== C.stableJson(state.settings || {});
+    if (changed) state.settings = settings;   // a setting changed while in the space is yours
+    afterSwitch('');
+    if (changed) commit();
+  }
+  function afterSwitch(collection) {
+    activeCollection = collection; selected.clear(); selecting = false;
+    samePreview = null; planProposal = null; lastReport = null; trip = null; shownIds = [];
+    document.body.classList.toggle('readonly', !!space && space.role === 'view');
+    $('#saveStatus').textContent = space ? 'Saved to the shared space' : 'Saved to your account';
+    render();
+    selectTab(['import', 'settings'].includes(currentTab) && space ? 'library' : currentTab);
+  }
+  // The space is gone (or you were removed). Changes not saved yet can still be downloaded.
+  function lostSpace(message, unsaved) {
+    stopPolling();
+    const name = space ? space.name : 'shared space';
+    if (!unsaved && (saveTimer || dirty)) unsaved = docSnapshot();
+    clearTimeout(saveTimer); saveTimer = null; dirty = false;
+    if (personal) { state = personal.state; base = personal.base; }
+    space = null; personal = null;
+    afterSwitch(''); refreshSpaces();
+    const text = (message || 'That shared space is gone.') + ' You are back in your library.';
+    if (unsaved) toast(text + ' Your last changes there did not save.', { label: 'Download them', run: () => download(fileSlug(name) + '-unsaved.json', JSON.stringify({ version: 1, ...unsaved }, null, 2), 'application/json') });
+    else toast(text);
+  }
+  async function joinFromLink() {
+    const token = pendingJoin; pendingJoin = '';
+    history.replaceState(null, '', '/');
+    // A new account first picks what its own library is for; then it joins.
+    while ($('#starterDialog').open) await new Promise(r => setTimeout(r, 200));
+    try {
+      const r = await Cloud.join(token);
+      await refreshSpaces(); await openSpace(r.space.id);
+      toast(`You joined “${r.space.name}”. It is in the sidebar under Shared spaces.`);
+    } catch (err) { toast(err.message); }
+  }
+
+  function renderSharing() {
+    const nav = $('#spaceNav'); if (!nav) return;
+    let out = `<button class="collection-link ${space ? '' : 'active'}" data-space=""><span>◉ My library</span></button>`;
+    for (const s of spaces) out += `<button class="collection-link space-link ${space && space.id === s.id ? 'active' : ''}" data-space="${html(s.id)}" title="${html(s.ownerIsYou ? 'You share this' : 'Shared by ' + s.owner)}"><span>👥 ${html(s.name)}</span><small>${s.pending ? '<b class="space-new">new</b>' : s.role === 'view' ? 'view' : html(s.people)}</small></button>`;
+    nav.innerHTML = out;
+    $('#spaceLabel').hidden = nav.hidden = !spaces.length && !space;
+    const sw = $('#spaceSwitch');
+    sw.hidden = !spaces.length && !space;
+    sw.innerHTML = '<option value="">◉ My library</option>' + spaces.map(s => `<option value="${html(s.id)}"${space && space.id === s.id ? ' selected' : ''}>👥 ${html(s.name)}${s.pending ? ' (new)' : ''}</option>`).join('');
+    const bar = $('#spaceBar'); bar.hidden = !space;
+    if (space) bar.innerHTML = `<div class="space-bar-text"><span class="space-icon" aria-hidden="true">👥</span><div><strong>${html(space.name)}</strong>`
+      + `<small>Shared space · ${space.ownerIsYou ? 'yours' : 'owner ' + html(space.owner)} · ${plural(space.people || 1, 'person', 'people')} · ${space.role === 'view' ? 'you can view it' : 'you can edit it'}</small></div></div>`
+      + `<div class="space-bar-actions"><button class="btn-light" type="button" data-share-open="space">${space.ownerIsYou ? 'Share & people' : 'People'}</button><button class="btn-subtle" type="button" data-space="">↩ My library</button></div>`;
+    $('#crumbRoot').textContent = space ? 'SHARED SPACE' : 'PERSONAL ARCHIVE';
+    $('#privacyLabel').textContent = space ? 'SHARED SPACE' : 'PRIVATE CLOUD LIBRARY';
+    $('#privacyText').textContent = space ? `“${space.name}” is shared with the people in it. Your own library stays private.` : 'Saved securely to your account. Only what you share is seen by others. No TikTok or other sign-in needed.';
+    $('#shareBtn').hidden = !(space || activeCollection);
+    $('#sharePlan').hidden = space && space.role === 'view';
+  }
+
+  /* The Share window: a view-only link for a collection, the itinerary or a shared space; turning a
+     collection into a shared space; and a shared space's people, invite links and settings. */
+  let shareTarget = null;
+  const linkUrl = path => location.origin + path;
+  function openShare(target) {
+    if (space) target = { type: 'space' };
+    shareTarget = target;
+    $('#shareError').textContent = '';
+    const d = $('#shareDialog'); if (!d.open) d.showModal();
+    renderShare();
+  }
+  async function renderShare() {
+    const t = shareTarget, body = $('#shareBody');
+    if (!t) return;
+    body.innerHTML = '<p class="hint">Loading…</p>';
+    try {
+      if (t.type === 'space') {
+        const r = await Cloud.people(space.id);
+        if (space.role === 'owner') r.history = ((await Cloud.history(space.id).catch(() => ({}))).versions) || [];
+        Object.assign(space, { name: r.space.name, role: r.space.role, people: r.people.length });
+        $('#shareEyebrow').textContent = 'SHARED SPACE'; $('#shareHeading').textContent = `“${space.name}”`;
+        body.innerHTML = spaceShareHtml(r); renderSharing();
+      } else {
+        const links = (await Cloud.links()).links || [];
+        if (t.type === 'collection') {
+          $('#shareEyebrow').textContent = 'SHARE A COLLECTION'; $('#shareHeading').textContent = `Share “${t.name}”`;
+          body.innerHTML = collectionShareHtml(t.name, links.find(l => l.kind === 'collection' && l.collection === t.name));
+        } else {
+          $('#shareEyebrow').textContent = 'SHARE YOUR ITINERARY'; $('#shareHeading').textContent = `Share “${state.tripTitle || 'My trip'}”`;
+          body.innerHTML = itineraryShareHtml(links.find(l => l.kind === 'itinerary'));
+        }
+      }
+    } catch (err) { body.innerHTML = ''; $('#shareError').textContent = err.message; }
+  }
+  function linkHtml(link, kind, what) {
+    if (!link) return `<label class="share-check"><input type="checkbox" id="shareNotes"> Include my notes on items</label>`
+      + `<div class="share-row"><button class="btn-primary" type="button" data-share="link-make" data-kind="${kind}">Create view-only link</button></div>`;
+    return `<div class="share-link"><input readonly value="${html(linkUrl(link.url))}" aria-label="View-only link to ${html(what)}"><button class="btn-primary" type="button" data-share="copy" data-url="${html(linkUrl(link.url))}">Copy link</button><a class="btn-light" href="${html(link.url)}" target="_blank" rel="noopener">Open ↗</a></div>`
+      + `<label class="share-check"><input type="checkbox" data-share="notes" data-token="${html(link.token)}"${link.includeNotes ? ' checked' : ''}> Include my notes on items</label>`
+      + `<div class="share-row"><button class="btn-subtle danger-text" type="button" data-share="link-off" data-token="${html(link.token)}">Turn the link off</button></div>`;
+  }
+  const inCollection = name => new Set(state.records.filter(r => (r.collections || []).includes(name)).map(r => r.id));
+  function collectionShareHtml(name, link) {
+    const ids = inCollection(name), stops = state.plan.filter(p => ids.has(p.recordId)).length;
+    return `<section class="share-sec"><h3>🔗 View-only link</h3><p class="hint">Anyone with the link sees “${html(name)}”: its ${plural(ids.size, 'item', 'items')}, the places in them and its research, on a page of its own. They can’t change anything. Transcripts and page text are never shown.</p>${linkHtml(link, 'collection', name)}</section>`
+      + `<section class="share-sec"><h3>👥 Work on it together</h3><p class="hint">Add people to “${html(name)}” so they can add to it and plan with you, by their ClipAtlas email or with an invite link. It moves into a <strong>shared space</strong>${stops ? `, with its ${plural(stops, 'itinerary stop', 'itinerary stops')}` : ''}, which everyone opens from the sidebar. Your notes on its items go along, so everyone you add sees them. An item that is also in another of your collections stays there too.${link ? ' Its view-only link keeps working and shows the shared space.' : ''}</p>`
+      + (stops ? `<label class="share-check"><input type="checkbox" id="shareTakePlan" checked> Take my itinerary along (${plural(stops, 'stop', 'stops')}, with the trip’s name, days and cities)</label>` : '')
+      + `<div class="share-row"><button class="btn-primary" type="button" data-share="to-space" data-name="${html(name)}">Share with people…</button></div></section>`;
+  }
+  function itineraryShareHtml(link) {
+    const byColl = new Map();
+    const byId = new Map(state.records.map(r => [r.id, r]));
+    for (const p of state.plan) for (const c of (byId.get(p.recordId)?.collections || [])) byColl.set(c, (byColl.get(c) || 0) + 1);
+    const colls = [...byColl.entries()].sort((a, b) => b[1] - a[1]);
+    return `<section class="share-sec"><h3>🔗 View-only link</h3><p class="hint">Anyone with the link sees your itinerary day by day: each stop’s place, address, map link and the item it came from. They can’t change anything.</p>${linkHtml(link, 'itinerary', 'your itinerary')}</section>`
+      + `<section class="share-sec"><h3>👥 Plan it together</h3><p class="hint">To plan with others, share the collection the trip comes from. Its itinerary stops go with it into a shared space.</p>`
+      + (colls.length ? `<div class="share-row">${colls.map(([c, n]) => `<button class="btn-light" type="button" data-share="coll" data-name="${html(c)}">Share “${html(c)}” (${plural(n, 'stop', 'stops')})</button>`).join('')}</div>`
+        : '<p class="hint">Your stops’ items are not in a collection yet. Add them to one (☐ Select → Add to collection), then share it.</p>') + '</section>';
+  }
+  function spaceShareHtml(r) {
+    const owner = space.role === 'owner';
+    const role = (v, id) => `<select data-share="role" data-user="${html(id)}" aria-label="What they can do"><option value="edit"${v === 'edit' ? ' selected' : ''}>Can edit</option><option value="view"${v === 'view' ? ' selected' : ''}>Can view</option></select>`;
+    const roleText = v => v === 'owner' ? 'Owner' : v === 'edit' ? 'Can edit' : 'Can view';
+    let out = `<section class="share-sec"><h3>👥 People</h3><ul class="share-people">${r.people.map(p => `<li><div><strong>${html(p.name)}${p.you ? ' (you)' : ''}</strong>${p.email ? `<small>${html(p.email)}${p.pending ? ' · added, not opened yet' : ''}</small>` : ''}</div>`
+      + (p.role === 'owner' || !owner ? `<span class="share-role">${roleText(p.role)}</span>` : `<span class="share-role">${role(p.role, p.userId)}<button class="btn-subtle" type="button" data-share="remove" data-user="${html(p.userId)}" data-name="${html(p.name)}">Remove</button></span>`) + '</li>').join('')}</ul>`;
+    if (owner) out += `<form class="share-add" id="shareAdd"><label class="field"><span>ADD BY THEIR CLIPATLAS EMAIL</span><input type="email" id="shareEmail" required placeholder="name@example.com" autocomplete="off"></label>`
+      + `<label class="field"><span>THEY CAN</span><select id="shareRole"><option value="edit">Edit</option><option value="view">View</option></select></label><button class="btn-primary" type="submit">Add</button></form>`;
+    out += '</section>';
+    if (owner) {
+      out += `<section class="share-sec"><h3>✉️ Invite link</h3><p class="hint">Anyone who opens it joins after signing in or making a free account. Turn it off once everyone is in.</p>`
+        + (r.invites || []).map(i => `<div class="share-link"><input readonly value="${html(linkUrl(i.url))}" aria-label="Invite link"><button class="btn-primary" type="button" data-share="copy" data-url="${html(linkUrl(i.url))}">Copy</button><span class="share-role">${i.role === 'edit' ? 'Can edit' : 'Can view'}</span><button class="btn-subtle danger-text" type="button" data-share="invite-off" data-token="${html(i.token)}">Turn off</button></div>`).join('')
+        + `<div class="share-row"><select id="inviteRole" aria-label="People who join can"><option value="edit">Joiners can edit</option><option value="view">Joiners can view</option></select><button class="btn-light" type="button" data-share="invite-make">Create invite link</button></div></section>`;
+      out += `<section class="share-sec"><h3>🔗 View-only link</h3><p class="hint">For anyone else: a page showing this space’s items, places, research and itinerary. Nobody signs in, and nobody can change anything.</p>${linkHtml((r.links || [])[0], 'space', space.name)}</section>`;
+      const versions = (r.history || []).map(v => `<li><span>${html(new Date(v.savedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}${v.by ? ' · ' + html(v.by) : ''} · ${plural(v.items, 'item', 'items')}</span><button class="btn-subtle" type="button" data-share="restore" data-revision="${v.revision}">Bring back</button></li>`).join('');
+      out += `<section class="share-sec"><h3>🕘 Earlier versions</h3><p class="hint">Kept every half hour of editing, and whenever a save takes out many items (the newest 10). Bringing one back keeps what is there now as a version too.</p>`
+        + (versions ? `<ul class="share-versions">${versions}</ul>` : '<p class="hint">None yet: the first is kept at the next save.</p>') + '</section>';
+      out += `<section class="share-sec"><h3>⚙ This space</h3><form class="share-add" id="shareRename"><label class="field"><span>NAME</span><input id="shareName" value="${html(space.name)}" maxlength="60" required></label><button class="btn-light" type="submit">Rename</button></form>`
+        + `<div class="share-row"><button class="btn-subtle danger-text" type="button" data-share="stop">Stop sharing…</button><span class="hint">Moves everything back into your library and removes everyone.</span></div></section>`;
+    } else out += `<section class="share-sec"><div class="share-row"><button class="btn-subtle danger-text" type="button" data-share="leave">Leave this space</button><span class="hint">It stays with the others. You can come back with an invite link, or if the owner adds you again.</span></div></section>`;
+    return out;
+  }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); toast('Link copied.'); }
+    catch (_) { const i = [...$$('#shareBody input[readonly]')].find(x => x.value === text); if (i) { i.select(); try { document.execCommand('copy'); toast('Link copied.'); } catch (_) { toast('Select the link and copy it.'); } } }
+  }
+  async function shareToSpace(name, takePlan) {
+    if (busyElsewhere() || !(await flushSaves())) return;
+    const split = C.spaceFromCollection(state, name, { takePlan });
+    const doc = { ...split.space }; delete doc.settings;
+    let made;
+    try { made = await Cloud.createSpace(name, doc, name); } catch (err) { $('#shareError').textContent = err.message; return; }
+    // The space is saved first, so nothing is lost if taking it out of your library fails.
+    state = split.rest; commit(); await flushSaves();
+    await refreshSpaces(); await openSpace(made.space.id);
+    toast(`“${name}” is now a shared space. Add people by email or send them an invite link.`);
+    openShare({ type: 'space' });
+  }
+  async function stopSharing() {
+    if (!space || space.role !== 'owner') return;
+    if (!confirm(`Stop sharing “${space.name}”? Everything in it moves back into your library, and everyone else loses access.`)) return;
+    if (busyElsewhere() || !(await flushSaves())) return;
+    const id = space.id, name = space.name, lib = personal.state, libBase = personal.base;
+    stopPolling();
+    // Move the newest version back, then delete exactly that version. If someone saved meanwhile, the
+    // delete is refused, and their newer version is moved back instead.
+    for (let tries = 0; tries < 5; tries++) {
+      let latest; try { latest = await Cloud.loadSpace(id); } catch (err) { $('#shareError').textContent = err.message; startPolling(); return; }
+      space = null; personal = null;
+      state = C.spaceIntoLibrary(lib, latest.state); base = libBase;
+      commit();
+      if (!(await flushSaves())) return;
+      try { await Cloud.deleteSpace(id, latest.revision); break; }
+      catch (err) {
+        if (err.status !== 409 || tries === 4) { toast(err.message); break; }   // else: again, with the newer version
+      }
+    }
+    $('#shareDialog').close();
+    await refreshSpaces(); afterSwitch(name);
+    toast(`“${name}” is back in your library and no longer shared.`);
+  }
+  async function leaveSpace() {
+    const me = (Cloud.user || {}).id;
+    if (!space || !me || !confirm(`Leave “${space.name}”? It stays with the others.`)) return;
+    try { await Cloud.removePerson(space.id, me); } catch (err) { $('#shareError').textContent = err.message; return; }
+    $('#shareDialog').close();
+    lostSpace(`You left “${space.name}”.`);
+  }
+  function sharingUI() {
+    const d = $('#shareDialog');
+    $('#shareClose').addEventListener('click', () => d.close());
+    document.addEventListener('click', evt => {
+      const sp = evt.target.closest('[data-space]');
+      if (sp) { evt.preventDefault(); sp.dataset.space ? openSpace(sp.dataset.space) : openLibrary(); return; }
+      const open = evt.target.closest('[data-share-open]');
+      if (open) openShare(open.dataset.shareOpen === 'itinerary' ? { type: 'itinerary' } : { type: 'collection', name: activeCollection });
+    });
+    $('#spaceSwitch').addEventListener('change', e => e.target.value ? openSpace(e.target.value) : openLibrary());
+    d.addEventListener('click', async evt => {
+      const b = evt.target.closest('[data-share]'); if (!b || b.tagName === 'SELECT' || b.type === 'checkbox') return;
+      const act = b.dataset.share; $('#shareError').textContent = '';
+      try {
+        if (act === 'copy') return copyText(b.dataset.url);
+        if (act === 'coll') return openShare({ type: 'collection', name: b.dataset.name });
+        if (act === 'to-space') return shareToSpace(b.dataset.name, $('#shareTakePlan') ? $('#shareTakePlan').checked : false);
+        if (act === 'stop') return stopSharing();
+        if (act === 'leave') return leaveSpace();
+        b.disabled = true;
+        if (act === 'link-make') {
+          const kind = b.dataset.kind, t = shareTarget;
+          await Cloud.makeLink({ kind, collection: t.type === 'collection' ? t.name : undefined, spaceId: kind === 'space' ? space.id : undefined, includeNotes: !!$('#shareNotes')?.checked });
+          toast('View-only link made. Copy it and send it to anyone.');
+        } else if (act === 'link-off') {
+          if (!confirm('Turn this link off? Anyone who has it will no longer be able to open it.')) { b.disabled = false; return; }
+          await Cloud.dropLink(b.dataset.token); toast('The link is off.');
+        } else if (act === 'invite-make') { await Cloud.invite(space.id, $('#inviteRole').value); toast('Invite link made. Copy it and send it to the people you want.'); }
+        else if (act === 'invite-off') { await Cloud.dropInvite(space.id, b.dataset.token); toast('That invite link is off.'); }
+        else if (act === 'restore') {
+          if (!confirm('Bring this version back for everyone? What is there now is kept as a version too.') || !(await flushSaves())) { b.disabled = false; return; }
+          await Cloud.restoreVersion(space.id, Number(b.dataset.revision));
+          await pullAndMerge(); base = docSnapshot(); toast('That version is back.');
+        }
+        else if (act === 'remove') {
+          if (!confirm(`Remove ${b.dataset.name} from “${space.name}”?`)) { b.disabled = false; return; }
+          await Cloud.removePerson(space.id, b.dataset.user); toast(`${b.dataset.name} was removed.`);
+        }
+        await renderShare(); refreshSpaces();
+      } catch (err) { b.disabled = false; $('#shareError').textContent = err.message; }
+    });
+    d.addEventListener('change', async evt => {
+      const el = evt.target.closest('[data-share]'); if (!el) return;
+      try {
+        if (el.dataset.share === 'notes') { await Cloud.setLinkNotes(el.dataset.token, el.checked); toast(el.checked ? 'The link now shows your notes.' : 'The link no longer shows your notes.'); }
+        else if (el.dataset.share === 'role') { await Cloud.setRole(space.id, el.dataset.user, el.value); toast('Saved.'); }
+      } catch (err) { $('#shareError').textContent = err.message; renderShare(); }
+    });
+    d.addEventListener('submit', async evt => {
+      evt.preventDefault(); $('#shareError').textContent = '';
+      try {
+        if (evt.target.id === 'shareAdd') {
+          const r = await Cloud.addPerson(space.id, $('#shareEmail').value.trim(), $('#shareRole').value);
+          toast(`${r.person.name} can now ${r.person.role === 'edit' ? 'edit' : 'view'} “${space.name}”.`);
+        } else if (evt.target.id === 'shareRename') {
+          const r = await Cloud.renameSpace(space.id, $('#shareName').value); space.name = r.name; toast('Renamed.');
+        }
+        await renderShare(); refreshSpaces();
+      } catch (err) { $('#shareError').textContent = err.message; }
+    });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+  }
   function applyState(saved) {
     state = saved && Array.isArray(saved.records) ? {...emptyState(),...saved} : emptyState();
     if(!Array.isArray(state.plan))state.plan=[];
@@ -2149,7 +2503,7 @@
     };
   }
   async function enter() {
-    const saved=await Cloud.load();const setup=applyState(saved);
+    const saved=await Cloud.load();base=clone(saved)||null;const setup=applyState(saved);
     // A plan made before the clips' places were listed: each clip's stop becomes its places' stops.
     const wholeStops=state.plan.filter(p=>!p.placeId).length;tidyPlan();
     const split=wholeStops-state.plan.filter(p=>!p.placeId).length;
@@ -2159,11 +2513,19 @@
     if(setup.needsChoice)openStarterDialog();
     else if(setup.migrated||split)commit();
     if(split)toast(`Your itinerary now has a stop for each place (${state.plan.length} stops). Itinerary → Overview → Fill the days spreads them over your days.`);
+    await refreshSpaces();
+    if(pendingJoin)await joinFromLink();
   }
   document.addEventListener('DOMContentLoaded',async()=>{
-    authUI();
+    authUI();sharingUI();
+    // An invite link (/join/<token>): say who it is from, and join once signed in.
+    const joining=/^\/join\/([a-f0-9]{32})\/?$/.exec(location.pathname);
+    if(joining){pendingJoin=joining[1];Cloud.joinInfo(pendingJoin).then(r=>{const n=$('#joinNote');n.hidden=false;
+      n.textContent=`${r.invite.owner} invited you to “${r.invite.space}” (you can ${r.invite.role==='edit'?'edit':'view'} it). Sign in, or create a free account, to join.`;})
+      .catch(err=>{const n=$('#joinNote');n.hidden=false;n.classList.add('bad');n.textContent=err.message;});}
     $('#signOut').addEventListener('click',async()=>{
       if(saveBusy || saveTimer || dirty){toast('Make sure your changes have finished saving before signing out.');return;}
+      stopPolling();
       try {await Cloud.logout();location.reload();}catch(e){toast(e.message);}
     });
     $('#importLocal').addEventListener('click',async()=>{

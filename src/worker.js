@@ -3,6 +3,7 @@ import {readTikTokLink,lookupTikTok,MESSAGES} from './tiktok.js';
 import {readUnderstandRequest,understandClip,readTranscribeRequest,transcribeAudio,checkAI,readAskRequest,askText,MESSAGES as UNDERSTAND} from './understand.js';
 import {relayGemini,geminiAllowed,GEMINI_MAX} from './gemini.js';
 import {readPageRequest,readPage} from './readpage.js';
+import {sharingRoute,viewPage} from './share.js';
 const encoder = new TextEncoder();
 const JSON_HEADERS = {'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'};
 const MAX_STATE = 2 * 1024 * 1024;
@@ -22,6 +23,9 @@ async function jsonBody(req,max=MAX_STATE+1024){const len=Number(req.headers.get
 async function getUser(req,env){const raw=/(?:^|;\s*)clipatlas_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.get('cookie')||'');if(!raw)return null;const tokenHash=await digest(raw[1]);return env.DB.prepare('SELECT u.id,u.email,u.display_name,s.expires_at FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token_hash=?').bind(tokenHash).first().then(x=>x&&x.expires_at>Date.now()?x:null);}
 function validateState(s){if(!s||typeof s!=='object'||Array.isArray(s)||s.version!==1||!Array.isArray(s.records)||!Array.isArray(s.collections)||!Array.isArray(s.plan))return false;if(s.records.length>10000||s.plan.length>20000||s.collections.length>1000)return false;if(s.categories!==undefined&&(!Array.isArray(s.categories)||s.categories.length>100))return false;if(s.settings!==undefined&&(!s.settings||typeof s.settings!=='object'||Array.isArray(s.settings)))return false;return true;}
 async function handle(req,env){const url=new URL(req.url),path=url.pathname,method=req.method;
+ // A view-only link (/s/<token>) is its own page; an invite link (/join/<token>) opens the app, which joins.
+ const viewing=/^\/s\/([a-f0-9]{32})\/?$/.exec(path);if(viewing&&method==='GET')return viewPage(req,env,viewing[1]);
+ if(/^\/join\/[a-f0-9]{32}\/?$/.test(path)&&method==='GET')return env.ASSETS.fetch(new Request(new URL('/',req.url),{headers:req.headers}));
  if(!path.startsWith('/api/'))return env.ASSETS.fetch(req);
  if(method!=='GET'&&!originOK(req))return bad('Invalid origin',403);
  if(path==='/api/health'&&method==='GET')return response({ok:true});
@@ -47,6 +51,7 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
  }
  const user=await getUser(req,env);
  if(path==='/api/me'&&method==='GET')return response({user:user?{id:user.id,email:user.email,displayName:user.display_name}:null});
+ const shared=await sharingRoute(req,env,user,{path,method,response,bad,jsonBody,validateState,randomHex,blocked,MAX_STATE});if(shared)return shared;
  if(!user)return bad('Please sign in',401);
  if(path==='/api/logout'&&method==='POST'){
   const raw=/(?:^|;\s*)clipatlas_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.get('cookie')||'');if(raw)await env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(raw[1])).run();
