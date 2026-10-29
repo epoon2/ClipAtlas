@@ -7,7 +7,7 @@
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
   const html = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
-  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My saved TikTok itinerary', dayCount: 7, dayCities: {}, questions: [] });
+  const emptyState = () => ({ version: 1, records: [], collections: [], plan: [], tripTitle: 'My trip', dayCount: 7, dayCities: {}, questions: [], collectionInfo: {}, reports: {}, placeAliases: {} });
   let state = emptyState();
   let currentTab = 'library', activeCollection = '', editingId = null, saveTimer = null;
   let selecting = false; const selected = new Set();  // choosing many clips at once
@@ -98,8 +98,8 @@
     $('#statPlanCard').hidden = !on;
     if (!on && currentTab === 'itinerary') selectTab('library');
     const starter = C.STARTERS[state.settings?.purpose];
-    $('#heroTitle').textContent = starter ? starter.hero : 'All the videos you saved.';
-    $('#heroLine').textContent = on ? 'Collect the clips. Capture the details. Plan the actual trip.' : 'Collect the clips. Capture the details. Find them again.';
+    $('#heroTitle').textContent = starter ? starter.hero : 'Everything you saved.';
+    $('#heroLine').textContent = on ? 'Save videos, pages and notes. Let AI sort what they say. Plan the actual trip.' : 'Save videos, pages and notes. Let AI sort what they say. Find it all again.';
   }
   const listCollections = () => [...new Set([...state.collections, ...state.records.flatMap(r => r.collections || [])])].sort((a,b)=>a.localeCompare(b));
   function selectTab(tab) {
@@ -139,20 +139,31 @@
     const panel=$('#askPanel');if(!panel)return;
     panel.hidden=!state.records.length;if(panel.hidden)return;
     const recs=scopeRecords(),scope=activeCollection||'';
-    $('#askScope').textContent=scope||'all your clips';
+    $('#askScope').textContent=scope||'everything you saved';
     $('#askCount').textContent=plural(recs.length,'item','items');
-    const city=(C.cityList(recs)[0]||{}).name;
-    const examples=[city&&`What should I eat in ${city}?`,'Which places do several clips recommend?','List every place by city, then food, sights, shopping and activities.',
-      city&&`What should I not miss in ${city}, and what can I skip?`,'Summarize the tips in these.'].filter(Boolean).slice(0,4);
+    const examples=askExamples(recs,scope);
     $('#askExamples').innerHTML=examples.map(q=>`<button type="button" class="chip ask-example" data-action="ask-example" data-q="${html(q)}">${html(q)}</button>`).join('');
-    $('#askInput').placeholder=scope?`Ask anything about “${scope}”: where to eat in a city, which places several sources recommend, everything sorted by city and then food, sights, activities and shopping…`
-      :'Ask anything about your saved clips: where to eat in a city, which places several sources recommend, everything sorted by city…';
+    $('#askInput').placeholder=`Ask anything about ${scope?`“${scope}”`:'everything you saved'}, for example: ${examples[0]||'what do these have in common?'}`;
     const byId=new Map(state.records.map(r=>[r.id,r]));
     $('#askAnswers').innerHTML=(state.questions||[]).filter(q=>q.scope===scope).map(q=>{
       const sources=q.ids.map(id=>{const r=byId.get(id);return r?{id:r.id,title:r.title||r.place||'',url:r.kind==='note'?'':r.url}:null;});
       const when=q.at?new Date(q.at).toLocaleDateString([],{month:'short',day:'numeric'}):'';
       return `<article class="ask-item"><p class="ask-q">${html(q.q)}</p><div class="ask-a">${C.renderAnswer(q.a,sources)}</div><p class="ask-meta">${html([when,`from ${plural(q.count,'item','items')}`,q.model].filter(Boolean).join(' · '))} <button type="button" class="link-inline" data-action="ask-again" data-id="${html(q.id)}">Ask again</button> <button type="button" class="link-inline" data-action="ask-delete" data-id="${html(q.id)}">Delete</button></p></article>`;
     }).join('');
+  }
+  // Example questions that fit what the collection is for: places for a trip, its own groups otherwise.
+  function askExamples(recs,scope){
+    const info=collInfo(scope),layout=C.collectionLayout(info,recs);
+    if(layout==='places'){
+      const city=(C.cityList(recs)[0]||{}).name;
+      return [city&&`What should I eat in ${city}?`,'Which places do several sources recommend?','List every place by city, then food, sights, shopping and activities.',
+        city&&`What should I not miss in ${city}, and what can I skip?`].filter(Boolean).slice(0,4);
+    }
+    const groups=(info&&info.groups)||[];
+    const byKind={cards:['Which card should I get next, and why?','Which transfer partners come up most?','What is time-sensitive here (offers that may end)?'],
+      shopping:['What do several sources recommend buying?','Where is the best place to buy these?'],recipes:['What can I make this week with these?','Which techniques come up most?'],
+      learning:['What are the main ideas, in order?','Where do the sources disagree?']}[info&&info.kind]||['What do several sources agree on?','What should I do first?'];
+    return [...byKind,...groups.slice(0,2).map(g=>`What do these say about ${g.name.toLowerCase()}?`),'Summarize the tips in these.'].slice(0,4);
   }
   // Gemini first (its stronger model; the whole collection fits); else Cloudflare with shorter sources.
   async function askNow(question,replaceId=''){
@@ -208,10 +219,14 @@
     renderBulkBar();
     $('#filteredCount').textContent=records.every(C.isClip)?records.length+' '+(records.length===1?'clip':'clips'):plural(records.length,'item','items');
     $('#libraryEmpty').hidden=records.length!==0;
-    const asPlaces=libraryView==='places';
+    const asPlaces=libraryView==='places',info=collInfo(activeCollection),layout=C.collectionLayout(info,records);
     for(const b of $$('[data-lib-view]')){const on=b.dataset.libView===libraryView;b.classList.toggle('active',on);b.setAttribute('aria-pressed',String(on));}
+    $('[data-lib-view="places"]').textContent=layout==='places'?'📍 Places by city':'📋 Research by topic';
+    $('#collSetupBtn').hidden=!activeCollection;
+    $('#collSetupBanner').hidden=!activeCollection||!!info;
+    if(activeCollection&&!info)$('#collSetupName').textContent=activeCollection;
     $('#clipGrid').hidden=asPlaces;$('#placesReport').hidden=!asPlaces;
-    if(asPlaces){$('#clipGrid').innerHTML='';renderReport(records);return;}
+    if(asPlaces){$('#clipGrid').innerHTML='';if(layout==='topics')renderTopicReport(records,info);else renderReport(records);return;}
     $('#placesReport').innerHTML='';
     $('#clipGrid').innerHTML=records.map(r=>{
       const clip=C.isClip(r),host=r.kind==='link'?hostOf(r.url):'';
@@ -230,15 +245,152 @@
       return `<article class="clip-card${clip?'':' kind-'+html(r.kind)}${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags">${flags}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html([host,loc||(clip?'Location not yet identified':'')].filter(Boolean).join(' · ')||'No place yet')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${placeLine}${about?`<p class="clip-notes">${html(about)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions">${actions}<button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete ${clip?'clip':r.kind==='link'?'web page':'note'}">✕</button></div></article>`;
     }).join('');
   }
+  /* ---- What a collection is for: set up once, used by its research view and Ask ---- */
+  const collInfo=name=>name?(state.collectionInfo||{})[name]||null:null;
+  // One AI request that answers in JSON: Gemini's stronger models first, then Cloudflare's.
+  async function aiJSON(request,promptText,read,say=()=>{},fallback=null){
+    if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
+    let why='';
+    if(aiConfig.gemini){
+      const body=JSON.stringify(request);
+      for(let tries=0;tries<3;tries++){
+        say('Asking Gemini…');
+        const res=await geminiPost(body,'ask');
+        if(res.status==='ok'){const v=read(res.text);if(v)return {value:v,model:res.model};why='the answer was not readable';break;}
+        if(res.stopRun)return {error:res.message};
+        why=res.detail||res.reason||'';
+        if(res.reason==='GEMINI_BUSY'){const wait=Math.min(60,Math.max(2,res.retryAfter||20));say(`Gemini asked to wait ${wait} seconds…`);await new Promise(ok=>setTimeout(ok,wait*1000));continue;}
+        break;
+      }
+    }
+    if(aiConfig.cloudflare){
+      say('Asking Cloudflare’s AI…');
+      try{const r=await fetch('/api/ask',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+          body:JSON.stringify({prompt:(fallback?fallback.prompt:promptText).slice(0,280000)+'\n\nReply with only the JSON object.'})});
+        const res=await r.json().catch(()=>({}));
+        if(res.status==='ok'){const v=(fallback?fallback.read:read)(res.text);if(v)return {value:v,model:res.model};why='the answer was not readable';}
+        else why=res.reason==='AI_DAILY_LIMIT'?'both free AI allowances are used up for today':(res.error||res.detail||res.reason||why);
+      }catch(_){why='connection problem';}
+    }
+    return {error:why||'no AI is set up (see the README: Gemini or Cloudflare)'};
+  }
+  let collEditing=null,collKind='other';
+  function openCollectionSetup(name){
+    collEditing=name;const info=collInfo(name);
+    collKind=info?info.kind:(C.collectionLayout(null,state.records.filter(r=>(r.collections||[]).includes(name)))==='places'?'trip':'other');
+    $('#collHeading').textContent=`What is “${name}” for?`;
+    $('#collAbout').value=info?info.about:'';$('#collStatus').textContent='';$('#collError').textContent='';
+    $('#collKinds').innerHTML=Object.entries(C.COLLECTION_KINDS).map(([k,v])=>`<button type="button" data-coll-kind="${k}" aria-pressed="${k===collKind}">${v.emoji} ${html(v.label)}</button>`).join('');
+    setCollGroups(info&&info.groups.length?info.groups:C.suggestedGroups(collKind));setCollKind(collKind);
+    $('#collectionDialog').showModal();
+  }
+  function setCollKind(kind){
+    const was=collKind,old=collGroups();collKind=kind;
+    for(const b of $$('#collKinds [data-coll-kind]'))b.setAttribute('aria-pressed',String(b.dataset.collKind===kind));
+    const places=C.COLLECTION_KINDS[kind].layout==='places';
+    $('#collPlacesNote').hidden=!places;$('#collGroupsWrap').hidden=places;
+    // Groups still as suggested for the kind before (or none yet) follow the new kind's suggestions.
+    const same=(a,b)=>JSON.stringify(a.map(g=>g.name))===JSON.stringify(b.map(g=>g.name));
+    if(!places&&(!old.length||same(old,C.suggestedGroups(was))))setCollGroups(C.suggestedGroups(kind));
+  }
+  function setCollGroups(list){
+    $('#collGroups').replaceChildren(...list.map(g=>{const row=document.createElement('div');row.className='coll-group';
+      row.innerHTML='<input class="cg-name" maxlength="60" placeholder="Group name" aria-label="Group name" /><input class="cg-hint" maxlength="140" placeholder="What goes in it (optional)" aria-label="What goes in it" /><button type="button" class="icon-only cg-remove" aria-label="Remove this group">✕</button>';
+      row.querySelector('.cg-name').value=g.name||'';row.querySelector('.cg-hint').value=g.hint||'';return row;}));
+  }
+  const collGroups=()=>C.cleanGroups([...$$('#collGroups .coll-group')].map(r=>({name:r.querySelector('.cg-name').value,hint:r.querySelector('.cg-hint').value})));
+  async function suggestCollGroups(){
+    const name=collEditing,recs=state.records.filter(r=>(r.collections||[]).includes(name)),btn=$('#collSuggest');
+    btn.disabled=true;
+    try{
+      const prompt=C.groupsPrompt({collection:name,kind:collKind,about:$('#collAbout').value,titles:recs.map(r=>r.title||r.place||r.auto?.summary||'').filter(Boolean)});
+      const out=await aiJSON(C.groupsRequest(prompt),prompt,C.readGroups,t=>{$('#collStatus').textContent=t;});
+      if(out.error){$('#collStatus').textContent=`That did not work: ${out.error}.`;return;}
+      setCollGroups(out.value);$('#collStatus').textContent='Suggested. Rename, remove or add any.';
+    }finally{btn.disabled=false;}
+  }
+  function saveCollectionSetup(e){
+    e.preventDefault();
+    const places=C.COLLECTION_KINDS[collKind].layout==='places',groups=places?[]:collGroups();
+    if(!places&&!groups.length){$('#collError').textContent='Add at least one group to sort into (or press ✦ Suggest with AI).';return;}
+    state.collectionInfo={...(state.collectionInfo||{}),[collEditing]:{kind:collKind,about:$('#collAbout').value.trim().slice(0,300),groups,at:new Date().toISOString()}};
+    state.collectionInfo=C.cleanCollectionInfo(state.collectionInfo);
+    $('#collectionDialog').close();libraryView='places';try{localStorage.setItem('ClipAtlasLibraryView','places');}catch(_){/* this visit only */}commit();
+    toast(places?`“${collEditing}” will be sorted by city, then kind of place.`:`“${collEditing}” will be sorted into ${plural(groups.length,'group','groups')}. Press ✦ Build the research to sort what it holds.`);
+  }
+
+  /* ---- Research by topic (a collection that is not about places) ---- */
+  let topicBuilding=false;
+  function renderTopicReport(records,info){
+    const box=$('#placesReport'),name=activeCollection;
+    if(!records.length){box.innerHTML='';return;}
+    if(!info){box.innerHTML=`<div class="topic-empty"><p>Tell ClipAtlas what <strong>${html(name||'this')}</strong> is for, and it sorts what these sources say into groups that fit, with how many sources say each thing.</p><button type="button" class="btn-primary" data-action="coll-setup">Set it up</button></div>`;return;}
+    const report=(state.reports||{})[name],byId=new Map(state.records.map(r=>[r.id,r]));
+    const changed=report?records.filter(r=>String(r.updatedAt||r.createdAt||'')>report.at).length+Math.max(0,records.length-report.count):0;
+    let s=`<div class="report-head"><p>Sorted into: ${info.groups.map(g=>`<span class="chip" title="${html(g.hint)}">${html(g.name)}</span>`).join(' ')} <button type="button" class="link-inline" data-action="coll-setup">Change</button></p><div class="report-actions-head"><button type="button" class="btn-primary" data-action="topic-build"${topicBuilding?' disabled':''}>${report?'↻ Rebuild the research':'✦ Build the research'}</button>${report?'<button type="button" class="btn-subtle" data-action="report-download">↓ Download</button>':''}</div></div><p class="hint" id="topicStatus" role="status" aria-live="polite">${report?html(`Built ${new Date(report.at).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} from ${plural(report.count,'item','items')}${report.model?' · '+report.model:''}`)+(changed?` · <strong>${plural(changed,'item is','items are')} new or changed since</strong>`:''):`The AI reads every item here and sorts what they say into these groups. Each point shows how many sources say it.`}</p>`;
+    if(report){
+      if(report.summary)s+=`<p class="topic-summary">${html(report.summary)}</p>`;
+      for(const g of report.groups){
+        s+=`<section class="report-city topic-group"><h3>${html(g.name)} <small>${plural(g.points.length,'point','points')}</small></h3><ul class="topic-points">`;
+        for(const pt of g.points){
+          const from=pt.ids.map(id=>byId.get(id)).filter(Boolean);
+          s+=`<li><span class="report-count${pt.ids.length>1?' many':''}" title="How many of your sources say this">${plural(pt.ids.length,'source','sources')}</span> ${html(pt.text)}<span class="report-from">From ${from.map(r=>`<button type="button" class="link-inline" data-action="edit" data-id="${html(r.id)}" title="Open it in Edit">${html(r.title||r.place||'a saved item')}</button>${r.url?` <a href="${html(r.url)}" target="_blank" rel="noopener noreferrer" aria-label="Open the source">↗</a>`:''}`).join(', ')||'items since deleted'}</span></li>`;
+        }
+        s+='</ul></section>';
+      }
+    }
+    box.innerHTML=s;
+  }
+  async function buildTopicReport(){
+    const name=activeCollection,info=collInfo(name);if(!name||!info||topicBuilding)return;
+    const recs=scopeRecords();if(!recs.length)return;
+    topicBuilding=true;renderLibrary();const say=t=>{const el=$('#topicStatus');if(el)el.textContent=t;};
+    try{
+      // Gemini reads up to 400,000 characters of sources; Cloudflare's model, if it has to answer, a shorter version.
+      const names=info.groups.map(g=>g.name),make=budget=>{const src=C.askSources(recs,{budget});
+        return {src,prompt:C.topicReportPrompt({collection:name,kind:info.kind,about:info.about,groups:info.groups,sources:src.text,count:src.count,left:src.left})};};
+      const big=make(400000),small=make(60000),src=big.src;
+      say(`Reading ${plural(src.count,'item','items')}…`);
+      const out=await aiJSON(C.topicReportRequest(big.prompt,names),big.prompt,t=>C.readTopicReport(t,big.src.ids,names),say,
+        {prompt:small.prompt,read:t=>C.readTopicReport(t,small.src.ids,names)});
+      if(out.error){topicBuilding=false;renderLibrary();say(`That did not work: ${out.error}.`);return;}
+      state.reports={...(state.reports||{}),[name]:{...out.value,at:new Date().toISOString(),model:out.model||'',count:recs.length}};
+      state.reports=C.cleanReports(state.reports);
+      const points=out.value.groups.reduce((n,g)=>n+g.points.length,0);
+      topicBuilding=false;commit();toast(`Sorted ${plural(points,'point','points')} from ${plural(src.count,'item','items')} into ${plural(out.value.groups.length,'group','groups')}.`);
+    }finally{if(topicBuilding){topicBuilding=false;renderLibrary();}}
+  }
+
+  /* ---- The same place under different names, found by the AI and merged when the person agrees ---- */
+  let samePreview=null,sameBusy=false;
+  function sameHtml(){
+    if(!samePreview)return '';
+    if(!samePreview.groups.length)return `<p>No place is listed twice under different names. <button type="button" class="link-inline" data-action="same-cancel">Close</button></p>`;
+    return `<p><strong>These look like the same place.</strong> Untick any that are not, then merge: each counts as one place, with all its sources.</p><ul>${samePreview.groups.map((g,i)=>`<li><label><input type="checkbox" data-same="${i}" checked> <strong>${html(g.name)}</strong> <small>${html(g.city)}</small> ← ${html(g.names.join(' · '))}</label></li>`).join('')}</ul><div class="ask-actions"><button type="button" class="btn-primary" data-action="same-merge">Merge the ticked ones</button><button type="button" class="btn-light" data-action="same-cancel">Cancel</button></div>`;
+  }
+  async function findSamePlaces(btn){
+    if(sameBusy||!lastReport)return;
+    const prompt=C.samePlacesPrompt(lastReport);
+    if(prompt.list.length<2){toast('There is nothing to compare yet.');return;}
+    sameBusy=true;btn.disabled=true;const old=btn.textContent;btn.textContent='✦ Looking…';
+    try{
+      const out=await aiJSON(C.samePlacesRequest(prompt.text),prompt.text,t=>C.readSamePlaces(t,prompt.list));
+      if(out.error){toast(`That did not work: ${out.error}.`);return;}
+      samePreview={groups:out.value};renderLibrary();
+    }finally{sameBusy=false;btn.disabled=false;btn.textContent=old;}
+  }
+
   // Places by city: what the clips shown (the open collection, filtered) add up to, as research.
   let libraryView=(()=>{try{return localStorage.getItem('ClipAtlasLibraryView')==='places'?'places':'cards';}catch(_){return 'cards';}})();
   let lastReport=null;
   function renderReport(records){
-    const box=$('#placesReport'),rep=C.placeReport(records);lastReport=rep;
+    const box=$('#placesReport'),rep=C.placeReport(records,{aliases:state.placeAliases||{}});lastReport=rep;
     if(!records.length){box.innerHTML='';return;}
     if(!rep.places){box.innerHTML='<div class="day-empty">No places found in these yet. Auto-review lists the places each clip names or shows (✦ Read does it for a web page or note).</div>';return;}
     const dayOf=C.planDays(state.plan),named=rep.cities.filter(c=>c.name);
-    let s=`<div class="report-head"><p><strong>${plural(rep.places,'place','places')}</strong> in ${plural(named.length,'city','cities')}, from ${plural(records.length,'item','items')}${rep.unnamed?` (${rep.unnamed} ${rep.unnamed===1?'names':'name'} no place)`:''}. In each city: food, shopping, sights, activities, then places to stay; places named by several clips come first.</p><button type="button" class="btn-subtle" data-action="report-download">↓ Download</button></div>`;
+    let s=`<div class="report-head"><p><strong>${plural(rep.places,'place','places')}</strong> in ${plural(named.length,'city','cities')}, from ${plural(records.length,'item','items')}${rep.unnamed?` (${rep.unnamed} ${rep.unnamed===1?'names':'name'} no place)`:''}. In each city: food, shopping, sights, activities, then places to stay. The number by each place is how many sources name it; the most named come first.</p><div class="report-actions-head"><button type="button" class="btn-subtle" data-action="same-places" title="Let the AI find places listed twice under different names (another spelling, a short form, Chinese and English)">✦ Find the same places</button><button type="button" class="btn-subtle" data-action="report-download">↓ Download</button></div></div>`;
+    s+=`<div id="sameBox" class="same-box"${samePreview?'':' hidden'}>${samePreview?sameHtml():''}</div>`;
+    if(rep.top.length)s+=`<div class="report-top"><strong>Most mentioned</strong> ${rep.top.map(t=>`<span class="chip">${html(t.name)} <b>${t.count}</b></span>`).join(' ')}</div>`;
     if(named.length>1)s+=`<nav class="city-jump" aria-label="Cities">${named.map(c=>`<button type="button" class="chip" data-action="report-jump" data-city="${html(c.name.toLowerCase())}">${html(c.name)} <small>${c.count}</small></button>`).join('')}</nav>`;
     for(const c of rep.cities){
       s+=`<section class="report-city" data-report-city="${html(c.name.toLowerCase())}"><h3>${c.name?'📍 '+html(c.name):'City not known yet'} <small>${html([c.country,plural(c.count,'place','places')].filter(Boolean).join(' · '))}</small></h3>`;
@@ -249,7 +401,8 @@
         for(const p of g.places){
           const map=C.mapsUrl({name:p.name,address:p.address,city:c.name,country:c.country});
           const day=p.sources.map(x=>dayOf({key:x.id+'#'+(x.placeId||''),recordId:x.id})).find(Boolean);
-          s+=`<li class="report-place"><div class="report-text"><strong>${html(p.name)}</strong>${p.sources.length>1?` <span class="report-count">${p.sources.length} clips</span>`:''}${day?` <span class="report-day">Day ${day}</span>`:''}${p.address?`<span class="report-address">📍 ${html(p.address)}</span>`:''}${p.notes.length?`<span class="report-notes">${html(p.notes.join(' · '))}</span>`:''}<span class="report-from">From ${p.sources.map(x=>`<button type="button" class="link-inline" data-action="edit-item" data-id="${html(x.id)}" data-place="${html(x.placeId||'')}" title="Open it in Edit">${html(x.title)}</button>${x.url?` <a href="${html(x.url)}" target="_blank" rel="noopener noreferrer" title="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}" aria-label="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}">↗</a>`:''}`).join(', ')}</span></div>${map?`<a class="map-link" href="${html(map)}" target="_blank" rel="noopener noreferrer" title="Open in Google Maps" aria-label="Open ${html(p.name)} in Google Maps">📍</a>`:''}</li>`;
+          const merged=(p.also||[]).length&&(state.placeAliases||{})[C.aliasKey(c.name,p.also[0])];
+          s+=`<li class="report-place"><div class="report-text"><strong>${html(p.name)}</strong> <span class="report-count${p.sources.length>1?' many':''}" title="How many of your sources name it">${plural(p.sources.length,'source','sources')}</span>${day?` <span class="report-day">Day ${day}</span>`:''}${(p.also||[]).length?`<span class="report-also">Also called: ${html(p.also.join(', '))}${merged?` <button type="button" class="link-inline" data-action="separate-place" data-city="${html(c.name)}" data-names="${html(JSON.stringify([p.name,...p.also]))}">Separate</button>`:''}</span>`:''}${p.address?`<span class="report-address">📍 ${html(p.address)}</span>`:''}${p.notes.length?`<span class="report-notes">${html(p.notes.join(' · '))}</span>`:''}<span class="report-from">From ${p.sources.map(x=>`<button type="button" class="link-inline" data-action="edit-item" data-id="${html(x.id)}" data-place="${html(x.placeId||'')}" title="Open it in Edit">${html(x.title)}</button>${x.url?` <a href="${html(x.url)}" target="_blank" rel="noopener noreferrer" title="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}" aria-label="${x.kind==='tiktok'?'Open the TikTok':'Open the page'}">↗</a>`:''}`).join(', ')}</span></div>${map?`<a class="map-link" href="${html(map)}" target="_blank" rel="noopener noreferrer" title="Open in Google Maps" aria-label="Open ${html(p.name)} in Google Maps">📍</a>`:''}</li>`;
         }
         s+='</ul></div>';
       }
@@ -352,7 +505,7 @@
     const box=$('#planAIResult');box.hidden=!planProposal;if(!planProposal)return;
     const {answer,count}=planProposal,byKey=new Map(C.tripItems(state.records).map(it=>[it.key,it]));
     // What the plan takes off, by place (the same place from another clip is the same place).
-    const same=it=>it.name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'')+'|'+String(it.city||'').toLowerCase();
+    const aliases=state.placeAliases||{},same=it=>C.placeNameKey(aliases[C.aliasKey(it.city,it.name)]||it.name)+'|'+String(it.city||'').trim().toLowerCase();
     const next=new Set(answer.days.flatMap(d=>d.stops.map(s=>byKey.get(s.key)).filter(Boolean).map(same)));
     const off=[...new Map(state.plan.map(p=>byKey.get(p.recordId+'#'+(p.placeId||''))).filter(it=>it&&!next.has(same(it))).map(it=>[same(it),it.name])).values()];
     let s=`<div class="plan-ai-head"><p>${html(answer.summary||'Here is a plan.')}</p><small>${plural(answer.stops,'stop','stops')} over ${plural(answer.days.filter(d=>d.stops.length).length,'day','days')}, from ${plural(count,'saved place','saved places')}${off.length?` · takes off ${html(off.slice(0,6).join(', '))}${off.length>6?' and '+(off.length-6)+' more':''} (still in By city)`:''}</small></div><div class="plan-ai-days">`;
@@ -373,7 +526,7 @@
     planAsking=true;$('#planAIButton').disabled=true;
     try{
       if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
-      const prompt=C.planAIPrompt({items,dayCount:state.dayCount,dayCities:state.dayCities,plan:state.plan,request});
+      const prompt=C.planAIPrompt({items,dayCount:state.dayCount,dayCities:state.dayCities,plan:state.plan,request,aliases:state.placeAliases||{}});
       let answer=null,why='';
       if(aiConfig.gemini){
         const body=JSON.stringify(C.planAIRequest(prompt.text));
@@ -706,7 +859,7 @@
     if(!name||!name.trim())return;
     const clean=name.trim().slice(0,100);
     if(!state.collections.includes(clean))state.collections.push(clean);
-    activeCollection=clean;commit();selectTab('library');toast('Collection created. Add clips or assign it when editing.');
+    activeCollection=clean;commit();selectTab('library');openCollectionSetup(clean);
   }
   function merge(imported, context='') {
     const m=C.mergeRecords(state.records, imported);
@@ -741,6 +894,7 @@
           clean.plan.forEach(p=>{p.day=Math.min(Number(p.day),clean.dayCount);});
           clean.dayCities=C.cleanDayCities(data.state.dayCities,clean.dayCount);
           clean.questions=C.cleanQuestions(data.state.questions);
+          clean.collectionInfo=C.cleanCollectionInfo(data.state.collectionInfo);clean.reports=C.cleanReports(data.state.reports);clean.placeAliases=C.cleanAliases(data.state.placeAliases);
           if(Array.isArray(data.state.categories))clean.categories=C.normalizeCategories(data.state.categories);
           if(data.state.settings)clean.settings=data.state.settings;
           state=C.ensureSetup(clean).state;if(!Array.isArray(state.categories))state=C.applyStarter(state,'empty');
@@ -1806,11 +1960,21 @@
       if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
       else if(kind==='read-item')readItem(id);
+      else if(kind==='coll-setup'&&activeCollection)openCollectionSetup(activeCollection);
+      else if(kind==='topic-build')buildTopicReport();
+      else if(kind==='same-places')findSamePlaces(action);
+      else if(kind==='same-cancel'){samePreview=null;renderLibrary();}
+      else if(kind==='same-merge'&&samePreview){const keep=samePreview.groups.filter((g,i)=>$(`[data-same="${i}"]`)?.checked);
+        state.placeAliases=C.mergePlaces(state.placeAliases,keep);samePreview=null;commit();toast(`Merged ${plural(keep.length,'place','places')} listed under several names.`);}
+      else if(kind==='separate-place'){let names=[];try{names=JSON.parse(action.dataset.names);}catch(_){}
+        state.placeAliases=C.separatePlace(state.placeAliases,action.dataset.city,names);commit();toast('Listed separately again.');}
       else if(kind==='plan-ai-example'){const box=$('#planAIInput'),v=box.value.trim();box.value=v?v.replace(/[.;,]?$/,'; ')+action.dataset.q.toLowerCase():action.dataset.q;box.focus();}
       else if(kind==='plan-ai-use')usePlanProposal();
       else if(kind==='plan-ai-discard'){planProposal=null;renderPlanAI();}
-      else if(kind==='report-download'&&lastReport){const name=activeCollection||'Saved places';
-        download(`${name.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase()||'places'}-places-by-city.md`,C.reportMarkdown(lastReport,`${name}: places by city`),'text/markdown');}
+      else if(kind==='report-download'){const name=activeCollection||'Saved places',slug=name.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase()||'research';
+        const report=(state.reports||{})[activeCollection],topics=C.collectionLayout(collInfo(activeCollection),scopeRecords())==='topics';
+        if(topics&&report)download(`${slug}-research.md`,C.topicMarkdown(report,`${name}: research`,state.records),'text/markdown');
+        else if(lastReport)download(`${slug}-places-by-city.md`,C.reportMarkdown(lastReport,`${name}: places by city`),'text/markdown');}
       else if(kind==='report-jump'){const sec=[...$$('#placesReport .report-city')].find(x=>x.dataset.reportCity===action.dataset.city);if(sec)sec.scrollIntoView({behavior:'smooth',block:'start'});}
       else if(kind==='ask-example'){$('#askInput').value=action.dataset.q;$('#askForm').requestSubmit();}
       else if(kind==='edit-item')openEditor(id,'tiktok',action.dataset.place||'');
@@ -1848,6 +2012,12 @@
     $('#cancelAnalyze').addEventListener('click',()=>{stopAnalysis=true;});
     $('#newCollection').addEventListener('click',addCollection);
     $('#editForm').addEventListener('submit',editorSave);
+    $('#collectionForm').addEventListener('submit',saveCollectionSetup);
+    for(const id of ['collClose','collCancel'])$('#'+id).addEventListener('click',()=>$('#collectionDialog').close());
+    $('#collKinds').addEventListener('click',e=>{const b=e.target.closest('[data-coll-kind]');if(b)setCollKind(b.dataset.collKind);});
+    $('#collAddGroup').addEventListener('click',()=>{setCollGroups([...collGroups(),{name:'',hint:''}]);$$('#collGroups .cg-name').at(-1).focus();});
+    $('#collGroups').addEventListener('click',e=>{const b=e.target.closest('.cg-remove');if(b)b.closest('.coll-group').remove();});
+    $('#collSuggest').addEventListener('click',suggestCollGroups);
     $('#kindPick').addEventListener('click',e=>{const b=e.target.closest('[data-kind]');if(b){setKind(b.dataset.kind,true);$('#modalError').textContent='';}});
     $('#readPageBtn').addEventListener('click',readPageIntoEditor);
     // A pasted link shows the right fields: a TikTok as a TikTok, any other page as a web link.
@@ -1929,6 +2099,7 @@
     if(!Array.isArray(state.plan))state.plan=[];
     if(!Array.isArray(state.collections))state.collections=[];
     state.dayCount=C.cleanDayCount(state.dayCount);state.dayCities=C.cleanDayCities(state.dayCities,state.dayCount);state.questions=C.cleanQuestions(state.questions);
+    state.collectionInfo=C.cleanCollectionInfo(state.collectionInfo);state.reports=C.cleanReports(state.reports);state.placeAliases=C.cleanAliases(state.placeAliases);
     const setup=C.ensureSetup(state);state=setup.state;return setup;
   }
   function authUI() {
