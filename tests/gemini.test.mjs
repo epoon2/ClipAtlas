@@ -71,6 +71,19 @@ test('slow down: said at once, with how long to wait; used up on every model: sa
   assert.equal(spent.calls.length, GEMINI_MODELS.length);
 });
 
+test('a model that is overloaded (503): the next one is asked, and the first is not skipped next time', async () => {
+  const g = fakeGoogle({ [GEMINI_MODELS[0]]: [[503, { error: { code: 503, status: 'UNAVAILABLE', message: 'The model is overloaded. Please try again later.' } }], [200, ANSWER]], [GEMINI_MODELS[1]]: [[200, ANSWER]] });
+  const r = await relayGemini(BODY, ENV, g.fetcher);
+  assert.deepEqual([r.status, r.model], ['ok', GEMINI_MODELS[1]]);
+  resetGeminiForTests();
+  const again = await relayGemini(BODY, ENV, g.fetcher);
+  assert.deepEqual([again.status, again.model], ['ok', GEMINI_MODELS[0]], 'the first model is still tried first');
+  const down = fakeGoogle(Object.fromEntries(GEMINI_MODELS.map(m => [m, [[503, { error: { message: 'overloaded' } }]]])));
+  resetGeminiForTests();
+  const none = await relayGemini(BODY, ENV, down.fetcher);
+  assert.deepEqual([none.reason, down.calls.length], ['GEMINI_FAILED', GEMINI_MODELS.length], 'all overloaded: said as a failure after asking each once');
+});
+
 test('a wrong key is not retried on other models; a model list can be set', async () => {
   const g = fakeGoogle({ [GEMINI_MODELS[0]]: [[400, { error: { message: 'API key not valid.', details: [{ reason: 'API_KEY_INVALID' }] } }]] });
   const r = await relayGemini(BODY, ENV, g.fetcher);

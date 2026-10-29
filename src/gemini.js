@@ -120,6 +120,8 @@ export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip') 
     if (e.kind === 'model' || e.kind === 'not_free') { skip.set(model, { until: now + 3600_000, why: 'missing' }); if (working[purpose] === model) delete working[purpose]; continue; }
     // Used up for today on this model: another model may still have requests left today.
     if (e.kind === 'day') { skip.set(model, { until: now + 3600_000, why: 'day' }); if (working[purpose] === model) delete working[purpose]; day = last; continue; }
+    // Google busy or down for this model (503 "overloaded", 500): the next model may answer; it is not skipped later.
+    if (e.kind === 'other' && res.status >= 500) continue;
     return last;
   }
   // Every model refused: "used up for today" says more than "no such model".

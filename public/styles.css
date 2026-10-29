@@ -136,7 +136,7 @@
 .ask-panel summary::after{content:'▾';margin-left:auto;color:#8aa39a}.ask-panel:not([open]) summary::after{content:'▸'}
 .ask-title{font-weight:800;color:#173b3c;font-size:15px}.ask-panel summary small{color:#7c8f88}
 .ask-body{margin-top:12px;display:grid;gap:12px}
-#askInput{width:100%;border:1px solid #dae4dd;border-radius:10px;padding:11px 12px;font:inherit;resize:vertical;color:#183d3c}
+#askInput,#planAIInput{width:100%;border:1px solid #dae4dd;border-radius:10px;padding:11px 12px;font:inherit;resize:vertical;color:#183d3c}
 .ask-actions{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}
 .ask-answers{display:grid;gap:12px}.ask-item{border:1px solid #e8eee9;border-radius:12px;padding:14px 16px;background:#fbfcfa}
 .ask-q{margin:0 0 8px;font-weight:750;color:#173b3c}.ask-a{color:#2b4a47;line-height:1.6;font-size:14px;overflow-wrap:anywhere}
@@ -192,3 +192,13 @@
 .report-count{background:#fff1d6;color:#8a6420}.report-day{background:#dff4e9;color:#3b8564}
 .ask-examples{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.ask-example{border:1px solid #dbe7df;cursor:pointer;font-size:11px}
 @media(max-width:600px){.report-groups{grid-template-columns:1fr}.report-city{padding:14px}}
+/* Plan with AI */
+.plan-ai{margin:16px 0 0}.plan-ai summary small{color:#7c8f88;margin-left:8px;font-size:12px}
+.plan-ai-result{border:1px solid #dfece5;background:#f7fbf8;border-radius:12px;padding:14px 16px;display:grid;gap:12px}
+.plan-ai-head p{margin:0;color:#24464a;font-weight:650}.plan-ai-head small{color:#6f857d}
+.plan-ai-days{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.plan-ai-day{background:#fff;border:1px solid #e6ede8;border-radius:10px;padding:10px 12px}.plan-ai-day h4{margin:0 0 6px;font-size:13px;color:#2f6c5f}
+.plan-ai-day ol{margin:0;padding-left:18px;display:grid;gap:5px;font-size:12px;color:#24464a}.plan-ai-day small{color:#7c8f88}
+.plan-ai-why{display:block;color:#6f857d;font-size:11px}
+.time-badge{display:inline-block;font-size:10px;font-weight:800;background:#eef2ee;color:#4e6f66;border-radius:8px;padding:1px 6px;margin-right:5px}
+.plan-ai-missing{font-size:12px;color:#7a6f5c;background:#fff9e9;border-radius:8px;padding:8px 12px}.plan-ai-missing ul{margin:4px 0 0;padding-left:18px}

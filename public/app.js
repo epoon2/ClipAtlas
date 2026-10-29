@@ -277,6 +277,7 @@
     $('#itineraryOverview').hidden=itineraryView!=='overview';$('#itineraryDays').hidden=itineraryView!=='days';$('#itineraryCities').hidden=itineraryView!=='cities';
     const known=C.cityList(state.records);
     $('#cityOptions').innerHTML=known.map(c=>`<option value="${html(c.name)}">${html(c.country?c.country+' · ':'')}${c.count} saved</option>`).join('');
+    renderPlanAI();
     if(itineraryView==='cities')renderCityBoard();else if(itineraryView==='overview')renderOverview();else renderDays();
   }
   const plural=(n,one,many)=>`${n} ${n===1?one:many}`;
@@ -342,6 +343,72 @@
     const extra=Object.values(res.left).reduce((a,b)=>a+b,0);
     toast(`Filled ${plural(res.days,'day','days')} with ${plural(res.stops.length,'stop','stops')}.${extra?` ${plural(extra,'more place','more places')} did not fit (at most 8 a day) and ${extra===1?'is':'are'} still in By city.`:''}`,
       {label:'Undo',run:()=>{state.plan=before.plan;state.dayCities=before.dayCities;state.dayCount=before.dayCount;trip.cities=null;commit();toast('Your days are back as they were.');}});
+  }
+  /* ---- Plan with AI: what the person wants, arranged from the saved places ---- */
+  let planAsking=false,planProposal=null;
+  const PLAN_EXAMPLES=['A night market every night','Breakfast, lunch and dinner each day','Noodles for lunch on day 2','Sights in the morning, shopping in the afternoon','Keep each day in one area'];
+  function renderPlanAI(){
+    $('#planAIExamples').innerHTML=PLAN_EXAMPLES.map(q=>`<button type="button" class="chip ask-example" data-action="plan-ai-example" data-q="${html(q)}">+ ${html(q)}</button>`).join('');
+    const box=$('#planAIResult');box.hidden=!planProposal;if(!planProposal)return;
+    const {answer,count}=planProposal,byKey=new Map(C.tripItems(state.records).map(it=>[it.key,it]));
+    // What the plan takes off, by place (the same place from another clip is the same place).
+    const same=it=>it.name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'')+'|'+String(it.city||'').toLowerCase();
+    const next=new Set(answer.days.flatMap(d=>d.stops.map(s=>byKey.get(s.key)).filter(Boolean).map(same)));
+    const off=[...new Map(state.plan.map(p=>byKey.get(p.recordId+'#'+(p.placeId||''))).filter(it=>it&&!next.has(same(it))).map(it=>[same(it),it.name])).values()];
+    let s=`<div class="plan-ai-head"><p>${html(answer.summary||'Here is a plan.')}</p><small>${plural(answer.stops,'stop','stops')} over ${plural(answer.days.filter(d=>d.stops.length).length,'day','days')}, from ${plural(count,'saved place','saved places')}${off.length?` · takes off ${html(off.slice(0,6).join(', '))}${off.length>6?' and '+(off.length-6)+' more':''} (still in By city)`:''}</small></div><div class="plan-ai-days">`;
+    for(const d of answer.days){if(!d.stops.length)continue;
+      s+=`<div class="plan-ai-day"><h4>${html(dayLabel(d.day))}</h4><ol>${d.stops.map(st=>{const it=byKey.get(st.key);
+        return `<li>${st.time?`<span class="time-badge">${html(C.PLAN_TIME_LABELS[st.time])}</span>`:''}<strong>${html(it?it.name:'?')}</strong>${it&&it.city?` <small>${html(it.city)}</small>`:''}${st.why?`<span class="plan-ai-why">${html(st.why)}</span>`:''}</li>`;}).join('')}</ol></div>`;}
+    s+='</div>';
+    if(answer.missing.length)s+=`<div class="plan-ai-missing"><strong>Not in your saved places:</strong><ul>${answer.missing.map(m=>`<li>${html(m)}</li>`).join('')}</ul></div>`;
+    s+=`<div class="ask-actions"><button type="button" class="btn-primary" data-action="plan-ai-use">Use this plan</button><button type="button" class="btn-light" data-action="plan-ai-discard">Discard</button></div>`;
+    box.innerHTML=s;
+  }
+  async function planWithAI(request){
+    request=String(request||'').trim();const say=t=>{$('#planAIStatus').textContent=t;};
+    if(!request){say('Write what you want first (or pick an example).');return;}
+    if(planAsking)return;
+    const items=C.tripItems(state.records);
+    if(!items.length){say('Save some clips with places first (auto-review lists them).');return;}
+    planAsking=true;$('#planAIButton').disabled=true;
+    try{
+      if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
+      const prompt=C.planAIPrompt({items,dayCount:state.dayCount,dayCities:state.dayCities,plan:state.plan,request});
+      let answer=null,why='';
+      if(aiConfig.gemini){
+        const body=JSON.stringify(C.planAIRequest(prompt.text));
+        for(let tries=0;tries<3&&!answer;tries++){
+          say(`Planning with Gemini from ${plural(prompt.count,'saved place','saved places')}…`);
+          const res=await geminiPost(body,'ask');
+          if(res.status==='ok'){answer=C.readPlanAnswer(res.text,prompt.keys,state.dayCount);if(!answer)why='the answer had no plan in it';break;}
+          if(res.stopRun){say(res.message);return;}
+          why=res.detail||res.reason||'';
+          if(res.reason==='GEMINI_BUSY'){const wait=Math.min(60,Math.max(2,res.retryAfter||20));say(`Gemini asked to wait ${wait} seconds…`);await new Promise(ok=>setTimeout(ok,wait*1000));continue;}
+          break;
+        }
+      }
+      if(!answer&&aiConfig.cloudflare){
+        say(`Planning with Cloudflare's AI from ${plural(prompt.count,'saved place','saved places')}…`);
+        try{const r=await fetch('/api/ask',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+            body:JSON.stringify({prompt:prompt.text+'\n\nReply with only the JSON object.'})});
+          const res=await r.json().catch(()=>({}));
+          if(res.status==='ok'){answer=C.readPlanAnswer(res.text,prompt.keys,state.dayCount);if(!answer)why='the answer had no plan in it';}
+          else why=res.reason==='AI_DAILY_LIMIT'?'both free AI allowances are used up for today':(res.error||res.detail||res.reason||why);
+        }catch(_){why='connection problem';}
+      }
+      if(!answer){say(why?`That did not work: ${why}.`:'No AI is set up to plan (see the README: Gemini or Cloudflare).');return;}
+      if(!answer.stops){say(answer.missing.length?'None of your saved places fits that; see below.':'It did not place anything; try saying it another way.');}
+      else say('');
+      planProposal={answer,count:prompt.count,request};renderPlanAI();
+      $('#planAIResult').scrollIntoView({behavior:'smooth',block:'nearest'});
+    }finally{planAsking=false;$('#planAIButton').disabled=false;}
+  }
+  function usePlanProposal(){
+    if(!planProposal)return;
+    const before={plan:state.plan};
+    state.plan=C.planFromAnswer(planProposal.answer,stopId);
+    planProposal=null;itineraryView='days';commit();
+    toast(`Your days now follow the AI's plan (${plural(state.plan.length,'stop','stops')}).`,{label:'Undo',run:()=>{state.plan=before.plan;commit();toast('Your days are back as they were.');}});
   }
   // What one stop is: a place of a clip, or a whole clip.
   function stopItem(entry,r){
@@ -1739,6 +1806,9 @@
       if(kind==='watch'){const byId=new Map(state.records.map(r=>[r.id,r]));rv.shown=shownIds.filter(x=>C.isClip(byId.get(x)));openReview('shown',id);}
       else if(kind==='edit')openEditor(id);
       else if(kind==='read-item')readItem(id);
+      else if(kind==='plan-ai-example'){const box=$('#planAIInput'),v=box.value.trim();box.value=v?v.replace(/[.;,]?$/,'; ')+action.dataset.q.toLowerCase():action.dataset.q;box.focus();}
+      else if(kind==='plan-ai-use')usePlanProposal();
+      else if(kind==='plan-ai-discard'){planProposal=null;renderPlanAI();}
       else if(kind==='report-download'&&lastReport){const name=activeCollection||'Saved places';
         download(`${name.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase()||'places'}-places-by-city.md`,C.reportMarkdown(lastReport,`${name}: places by city`),'text/markdown');}
       else if(kind==='report-jump'){const sec=[...$$('#placesReport .report-city')].find(x=>x.dataset.reportCity===action.dataset.city);if(sec)sec.scrollIntoView({behavior:'smooth',block:'start'});}
@@ -1785,6 +1855,8 @@
       const v=e.target.value;if(editingKind==='link'&&C.parseTikTokURL(v))setKind('tiktok',true);else if(editingKind==='tiktok'&&!C.parseTikTokURL(v)&&C.webLink(v))setKind('link',true);});
     $('#closeDialog').addEventListener('click',()=>$('#editDialog').close());
     $('#cancelEdit').addEventListener('click',()=>$('#editDialog').close());
+    $('#planAIForm').addEventListener('submit',e=>{e.preventDefault();planWithAI($('#planAIInput').value);});
+    $('#planAIInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('#planAIForm').requestSubmit();}});
     $('#askForm').addEventListener('submit',async e=>{e.preventDefault();if(await askNow($('#askInput').value))$('#askInput').value='';});
     $('#askInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('#askForm').requestSubmit();}});
     $('#addPlace').addEventListener('click',()=>{const row=placeRow({city:$('#editForm').elements.namedItem('city').value});$('#editPlaces').append(row);row.querySelector('.pl-name').focus();});

@@ -603,3 +603,33 @@ test('places by city: each place once with every clip that names it, most-recomm
  assert.match(md,/^# Taiwan: places by city\n\n5 places in 2 cities\.\n\n## Taipei, Taiwan \(3\)\n\n### 🍜 Food \(2\)\n\n- \*\*Raohe Night Market\*\* \(in 2 clips\): pepper buns\n  - Address: Raohe St, Songshan\n  - Map: https:/);
  assert.match(md,/## City not known yet \(1\)/);assert.match(md,/_1 clip names no place\._\n$/);
 });
+
+// ---- Plan with AI
+test('the plan prompt: each saved place once and numbered, the days and their cities, the current days, the request',()=>{
+ const a=C.createRecord({url:long,title:'Night markets',places:[{name:'Raohe Night Market',type:'food',city:'Taipei',note:'pepper buns'},{name:'Lin Dong Fang',type:'food',city:'Taipei'}]});
+ const b=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Taipei day',places:[{name:'Raohe night market',type:'food',city:'taipei'},{name:'Taipei 101',type:'sightseeing',city:'Taipei'}]});
+ const items=C.tripItems([a,b]);
+ const plan=[{id:'s',recordId:b.id,placeId:b.places[1].id,day:2,note:''},{id:'t',recordId:b.id,placeId:b.places[0].id,day:2,note:''}];
+ const p=C.planAIPrompt({items,dayCount:3,dayCities:{1:['Taipei'],3:['Tainan']},plan,request:'A night market every night',today:'2026-10-28'});
+ assert.equal(p.count,3,'the same place from two clips is one');
+ assert.deepEqual(p.keys,[items[0].key,items[1].key,items[3].key]);
+ assert.match(p.text,/1\. Raohe Night Market \(food, Taipei\): pepper buns \[in 2 clips\]\n2\. Lin Dong Fang \(food, Taipei\)\n3\. Taipei 101 \(sightseeing, Taipei\)/);
+ assert.match(p.text,/Day 1: Taipei\nDay 2: any city\nDay 3: Tainan/);
+ assert.match(p.text,/Day 2: 3, 1\n/,'the current days by number, the other clip\'s copy counted as the same place');
+ assert.match(p.text,/<<<\nA night market every night\n>>>/);
+ const req=C.planAIRequest(p.text);
+ assert.deepEqual(req.generationConfig.responseSchema.properties.days.items.properties.stops.items.properties.time.enum,C.PLAN_TIMES);
+});
+test('the AI plan is checked: listed places only, each once, real days, at most 10 a day, in time order; notes say when and why',()=>{
+ const keys=['r1#p1','r1#p2','r2#','r3#p9'];
+ const text='Sure! {"days":[{"day":1,"stops":[{"place":2,"time":"night","why":"night market at night"},{"place":1,"time":"breakfast","why":"soy milk to start"},{"place":7,"time":"lunch"},{"place":1,"time":"lunch"}]},'+
+  '{"day":2,"stops":[{"place":3,"time":"","why":"a whole clip"},{"place":4,"time":"afternoon"}]},{"day":9,"stops":[{"place":4,"time":"lunch"}]}],"missing":["no saved noodle shop in Tainan"],"summary":"Two days."}';
+ const a=C.readPlanAnswer(text,keys,3);
+ assert.deepEqual(a.days.map(d=>[d.day,d.stops.map(s=>[s.key,s.time])]),[[1,[['r1#p1','breakfast'],['r1#p2','night']]],[2,[['r2#',''],['r3#p9','afternoon']]]]);
+ assert.deepEqual([a.stops,a.missing,a.summary],[4,['no saved noodle shop in Tainan'],'Two days.']);
+ let n=0;const plan=C.planFromAnswer(a,()=>'s'+(++n));
+ assert.deepEqual(plan.map(p=>[p.recordId,p.placeId||'',p.day,p.note]),[['r1','p1',1,'Breakfast — soy milk to start'],['r1','p2',1,'Night — night market at night'],['r2','',2,'a whole clip'],['r3','p9',2,'Afternoon']]);
+ assert.equal(C.readPlanAnswer('no plan here',keys,3),null);
+ const many={days:[{day:1,stops:Array.from({length:14},(_,i)=>({place:i+1,time:'morning'}))}]};
+ assert.equal(C.readPlanAnswer(JSON.stringify(many),Array.from({length:14},(_,i)=>'r#'+i),2).days[0].stops.length,10);
+});

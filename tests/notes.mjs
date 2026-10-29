@@ -12,7 +12,7 @@ const { chromium } = createRequire(import.meta.url)('playwright');
 const GUIDE = `<!doctype html><html><head><title>48 hours in Taipei</title><meta name="description" content="A short guide."></head>
 <body><nav>Home · Guides</nav><article><h1>48 hours in Taipei</h1><p>Breakfast at Fuhang Soy Milk.</p><p>Evening at Raohe Night Market, then Taipei 101.</p></article><footer>© Guide site</footer></body></html>`;
 const pagesAsked = [];
-const gemini = { calls: [], asks: [] };
+const gemini = { calls: [], asks: [], plans: [] };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const answer = obj => json(200, { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: typeof obj === 'string' ? obj : JSON.stringify(obj) }] } }],
   usageMetadata: { promptTokenCount: 900, candidatesTokenCount: 120 } });
@@ -20,6 +20,12 @@ globalThis.fetch = async (url, init = {}) => {
   url = String(url);
   if (url.startsWith('https://generativelanguage.googleapis.com/')) {
     const body = JSON.parse(new TextDecoder().decode(init.body)), text = body.contents[0].parts[0].text;
+    if (body.generationConfig.responseSchema && body.generationConfig.responseSchema.properties.days) {   // Plan with AI
+      gemini.plans.push(text);
+      const num = name => Number((new RegExp(`(\\d+)\\. ${name} \\(`).exec(text) || [])[1]);
+      return answer({ days: [{ day: 1, stops: [{ place: num('Raohe Night Market'), time: 'night', why: 'a night market at night' }, { place: num('Fuhang Soy Milk'), time: 'breakfast', why: 'soy milk to start' }] }],
+        missing: ['no saved noodle shop'], summary: 'Breakfast and a night market on day 1.' });
+    }
     if (!body.generationConfig.responseSchema) { gemini.asks.push(text); return answer('## Breakfast\n\n- **Fuhang Soy Milk** [1]\n- Jiufen tea [3]'); }
     gemini.calls.push({ text, parts: body.contents[0].parts.length, keys: Object.keys(body.generationConfig.responseSchema.properties) });
     const places = [];
@@ -178,6 +184,29 @@ check('a page’s stop links to the page', (await page.locator('#itineraryDays a
 check('a note’s stop says it is from the note', /From your note “Jiufen tea”/.test(days));
 await page.click('[data-itinerary-view="cities"]');
 check('By city lists the note’s place under Jiufen', /Jiufen[\s\S]*A-Mei Tea House/.test(await page.textContent('#itineraryCities')));
+
+// 6a. Plan with AI: say what you want; it arranges the saved places, shows the plan, and changes the days only when asked.
+check('Plan with AI is open on the itinerary, with examples', await page.$eval('#planAI', d => d.open) && await page.isVisible('#planAIInput') &&
+  (await page.locator('#planAIExamples .ask-example').count()) >= 4);
+await page.click('[data-action="plan-ai-example"][data-q="A night market every night"]');
+await page.locator('#planAIInput').press('End'); await page.keyboard.type('; noodles for lunch');
+await page.click('#planAIButton');
+await waitFor(async () => await page.isVisible('#planAIResult'));
+const preview = await page.textContent('#planAIResult');
+await page.locator('#planAI').screenshot({ path: (process.env.SHOT || '/tmp/clipatlas.png').replace(/\.png$/, '-planai.png') });
+check('the AI got the request, the saved places by number and the days as they are', /<<<\nA night market every night; noodles for lunch\n>>>/.test(gemini.plans[0] || '') &&
+  /\d+\. Fuhang Soy Milk \(food, Taipei\)/.test(gemini.plans[0] || '') && /The days as they are now[^\n]*\nDay 1: \d/.test(gemini.plans[0] || ''), (gemini.plans[0] || '').slice(0, 400));
+check('the plan is shown first: when, what and why, what is missing, and what it takes off',
+  /Breakfast and a night market on day 1\./.test(preview) && /🍳 BreakfastFuhang Soy Milk Taipeisoy milk to start🌙 NightRaohe Night Market Taipeia night market at night/.test(preview.replace(/\s*\n\s*/g, '')) &&
+  /Not in your saved places:no saved noodle shop/.test(preview.replace(/\s*\n\s*/g, '')) && /takes off Taipei 101, A-Mei Tea House \(still in By city\)/.test(preview), preview);
+check('… and the days are not changed yet', /Taipei 101/.test(await page.textContent('#itineraryDays')));
+await page.click('[data-action="plan-ai-use"]');
+const aiDay1 = await page.$$eval('#itineraryDays .day-panel:first-child .stop', els => els.map(e => [e.querySelector('h4').textContent, e.querySelector('[data-plan-note]').value]));
+check('Use this plan: the days follow it, each stop noting when and why',
+  JSON.stringify(aiDay1) === JSON.stringify([['Fuhang Soy Milk', 'Breakfast — soy milk to start'], ['Raohe Night Market', 'Night — a night market at night']]) && !/Taipei 101/.test(await page.textContent('#itineraryDays')),
+  JSON.stringify(aiDay1));
+await page.click('#toast .toast-action');
+check('… and Undo puts the days back', /Taipei 101/.test(await page.textContent('#itineraryDays')) && /A-Mei Tea House/.test(await page.textContent('#itineraryDays')));
 
 // 6b. A plan made before the places were listed: when the site opens, each clip's stop becomes its places' stops.
 await page.waitForTimeout(500);
