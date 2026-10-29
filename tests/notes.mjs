@@ -165,10 +165,19 @@ await raohe.locator('.report-from button', { hasText: 'Jiufen tea' }).click();
 check('the name of a clip it is from opens that clip in Edit, at the place', await page.isVisible('#editDialog[open]') &&
   await page.evaluate(() => document.activeElement.closest('.place-row')?.querySelector('.pl-name').value) === 'Raohe Night Market');
 await page.click('#cancelEdit');
-const [reportFile] = await Promise.all([page.waitForEvent('download'), page.click('[data-action="report-download"]')]);
-const reportMd = (await import('node:fs')).readFileSync(await reportFile.path(), 'utf8');
-check('Download gives the research as a Markdown file', reportFile.suggestedFilename() === 'taiwan-places-by-city.md' && /^# Taiwan: places by city\n/.test(reportMd) &&
-  /- \*\*Raohe Night Market\*\* — 2 sources/.test(reportMd), reportFile.suggestedFilename() + ' ' + reportMd.slice(0, 200));
+await page.click('#placesReport .dl-menu summary');
+check('Download opens a menu: a document or a spreadsheet', await page.isVisible('#placesReport .dl-pop [data-format="html"]') && await page.isVisible('#placesReport .dl-pop [data-format="csv"]'));
+const [reportFile] = await Promise.all([page.waitForEvent('download'), page.click('#placesReport .dl-pop [data-format="html"]')]);
+const reportDoc = (await import('node:fs')).readFileSync(await reportFile.path(), 'utf8');
+check('Document is a web page anyone can open, with the count of sources by each place', reportFile.suggestedFilename() === 'taiwan-places-by-city.html' &&
+  /^<!doctype html>/.test(reportDoc) && /<h1>Taiwan: places by city<\/h1>/.test(reportDoc) && /<strong>Raohe Night Market<\/strong>.*?<td class="n">2<\/td>/.test(reportDoc) &&
+  /Save as PDF/.test(reportDoc), reportFile.suggestedFilename() + ' ' + reportDoc.slice(0, 200));
+check('the menu closes after a download', !(await page.isVisible('#placesReport .dl-pop')));
+await page.click('#placesReport .dl-menu summary');
+const [reportSheet] = await Promise.all([page.waitForEvent('download'), page.click('#placesReport .dl-pop [data-format="csv"]')]);
+const reportCsv = (await import('node:fs')).readFileSync(await reportSheet.path(), 'utf8');
+check('Spreadsheet is a CSV with a header row and one row a place', reportSheet.suggestedFilename() === 'taiwan-places-by-city.csv' &&
+  reportCsv.startsWith('\ufeffCity,Country,Kind,Place,Sources,') && /\r\nTaipei,Taiwan,Food,Raohe Night Market,2,/.test(reportCsv), reportCsv.slice(0, 300));
 await page.click('[data-lib-view="cards"]');
 
 // 6. Planning: a page's places become stops that link back to the page; a note's say where they came from.

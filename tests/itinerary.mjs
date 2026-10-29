@@ -105,9 +105,11 @@ check('a clip with no city still goes to day 1', /^Added to Day 1 · Taipei/.tes
 await page.click('.nav-link[data-tab="itinerary"]');
 
 // The export names each day's cities.
-const [download] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan')]);
-const md = fs.readFileSync(await download.path(), 'utf8');
-check('the exported plan names each day\'s cities', /## Day 1 · Taipei\n\n1\. \*\*Airport tips\*\*/.test(md) && /## Day 2 · Tainan\n/.test(md) && /## Day 3 · Taipei\n/.test(md), md.slice(0, 300));
+await page.click('#exportPlan summary');
+const [download] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan [data-format="html"]')]);
+const doc = fs.readFileSync(await download.path(), 'utf8');
+check('Export plan → Document names each day\'s cities', download.suggestedFilename() === 'taiwan-itinerary.html' && /<h1>Taiwan<\/h1>/.test(doc) &&
+  /<h2>Day 1 · Taipei<\/h2><table>.*?<strong>Airport tips<\/strong>/.test(doc) && /<h2>Day 2 · Tainan<\/h2>/.test(doc) && /<h2>Day 3 · Taipei<\/h2>/.test(doc), download.suggestedFilename() + ' ' + doc.slice(0, 300));
 
 // Fewer days: later stops move to the last day, later cities are cleared (after a confirm).
 await page.fill('#dayCount', '2'); await page.press('#dayCount', 'Tab');
@@ -189,9 +191,12 @@ await iceCream.locator('select').selectOption('1');
 await page.click('[data-itinerary-view="days"]');
 const day1 = await page.$$eval('#itineraryDays .day-panel:first-child .stop', els => els.map(e => [e.querySelector('h4').textContent, e.querySelector('a.stop-source').textContent]));
 check('the place is a stop of its own, linked to its TikTok', JSON.stringify(day1) === JSON.stringify([['Airport tips', 'View original TikTok ↗'], ['Snow King Ice Cream', 'From “Ximending shopping street” ↗']]), JSON.stringify(day1));
-const [placesFile] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan')]);
-const placesMd = fs.readFileSync(await placesFile.path(), 'utf8');
-check('the export names the place, its kind and where it came from', /\*\*Snow King Ice Cream\*\* \(Food\) — Taipei, Taiwan\n   - Map: https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=Snow%20King%20Ice%20Cream%2C%20Taipei%2C%20Taiwan\n   - From: Ximending shopping street \(https:/.test(placesMd), placesMd.slice(0, 400));
+await page.click('#exportPlan summary');
+const [placesFile] = await Promise.all([page.waitForEvent('download'), page.click('#exportPlan [data-format="csv"]')]);
+const placesCsv = fs.readFileSync(await placesFile.path(), 'utf8');
+check('Export plan → Spreadsheet: a row a stop, with its kind, map and where it came from', placesFile.suggestedFilename() === 'taiwan-itinerary.csv' &&
+  placesCsv.startsWith('\ufeffDay,Day cities,Order,Stop,Kind,What to get or do,City,Country,Address,Google Maps,Plan note,Your notes,From,Link\r\n') &&
+  /\r\n1,Taipei,2,Snow King Ice Cream,Food,[^\r]*,Taipei,Taiwan,,https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=Snow%20King%20Ice%20Cream%2C%20Taipei%2C%20Taiwan,[^\r]*Ximending shopping street,https:/.test(placesCsv), placesCsv.slice(0, 600));
 
 // Fixing details from the itinerary: ✎ opens Edit at that place; a city typed in By city moves a clip that had none.
 await page.click('[data-itinerary-view="cities"]');

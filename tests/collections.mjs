@@ -111,10 +111,16 @@ check('points sit under the person\'s groups, in their order, each saying how ma
   JSON.stringify(points) === '[["Sign-up bonuses",["1 source"]],["Transfer partners",["3 sources","1 source"]]]', JSON.stringify(points));
 check('… with the summary and the sources by name', /Hyatt through Chase comes up most/.test(await page.textContent('#placesReport')) &&
   /From Hyatt tip, Sapphire Preferred review ↗, Amex Gold notes|From Amex Gold notes/.test(await page.textContent('#placesReport .topic-group:nth-of-type(2)')));
-const [md] = await Promise.all([page.waitForEvent('download'), page.click('#placesReport [data-action="report-download"]')]);
-const mdText = fs.readFileSync(await md.path(), 'utf8');
-check('Download gives the research as Markdown, with the count by each point', md.suggestedFilename() === 'credit-card-points-research.md' &&
-  /- Chase points transfer 1:1 to Hyatt\. — 3 sources\n/.test(mdText), md.suggestedFilename() + ' ' + mdText.slice(0, 200));
+await page.click('#placesReport .dl-menu summary');
+const [doc] = await Promise.all([page.waitForEvent('download'), page.click('#placesReport .dl-pop [data-format="html"]')]);
+const docText = fs.readFileSync(await doc.path(), 'utf8');
+check('Download as a document: a web page with the count of sources by each point', doc.suggestedFilename() === 'credit-card-points-research.html' &&
+  /<h2>Transfer partners <small>2 points<\/small><\/h2>/.test(docText) && /<td>Chase points transfer 1:1 to Hyatt\.<\/td><td class="n">3<\/td>/.test(docText), doc.suggestedFilename() + ' ' + docText.slice(0, 300));
+await page.click('#placesReport .dl-menu summary');
+const [sheet] = await Promise.all([page.waitForEvent('download'), page.click('#placesReport .dl-pop [data-format="csv"]')]);
+const sheetText = fs.readFileSync(await sheet.path(), 'utf8');
+check('… or as a spreadsheet, one row a point', sheet.suggestedFilename() === 'credit-card-points-research.csv' &&
+  /\r\nTransfer partners,Chase points transfer 1:1 to Hyatt\.,3,/.test(sheetText), sheetText.slice(0, 300));
 await waitFor(async () => !!((await library()).state.reports || {})['Credit Card Points']);
 await page.reload();
 await page.waitForSelector('#appShell:not([hidden])');

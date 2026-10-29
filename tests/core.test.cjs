@@ -686,3 +686,39 @@ test('a topic report: points under the person\'s groups, each with its sources, 
  const md=C.topicMarkdown(kept['Credit Card Points'],'Credit Card Points: research',recs);
  assert.match(md,/^# Credit Card Points: research\n\nTwo programs come up most\.\n\n## Transfer partners \(2\)\n\n- Chase points go 1:1 to Hyatt — 3 sources\n  - From: Amex guide \(https:\/\/example\.com\/amex\); Chase post; Hyatt tips\n/);
 });
+test('questions, the plan and the research keep Gemini\'s thinking low (fast); quick jobs leave it to the fast model',()=>{
+ for(const req of [C.askRequest('q'),C.planAIRequest('p'),C.topicReportRequest('t',['A'])])assert.deepEqual(req.generationConfig.thinkingConfig,{thinkingLevel:'low'});
+ for(const req of [C.groupsRequest('g'),C.samePlacesRequest('s')])assert.equal(req.generationConfig.thinkingConfig,undefined);
+});
+test('downloads anyone can open: a web page and a spreadsheet, both safe',()=>{
+ const csv=C.csvDocument(['Name','Note'],[['=HYPERLINK("x")','a, "quoted" note'],['+1','-2'],['Café 台北','@home']]);
+ assert.ok(csv.startsWith('﻿Name,Note\r\n'),'a byte-order mark so Excel reads accents and Chinese');
+ assert.ok(csv.includes('"\'=HYPERLINK(""x"")"'),'a cell a spreadsheet would run as a formula is kept as text');
+ assert.ok(csv.includes("'+1,'-2\r\n")&&csv.includes("Café 台北,'@home\r\n"));
+ const page=C.htmlDocument('Trip <script>alert(1)</script>','<p>body</p>',{made:'2026-10-29T10:00:00Z'});
+ assert.ok(/^<!doctype html>\n<html lang="en">/.test(page)&&page.includes('<meta charset="utf-8">'));
+ assert.ok(!page.includes('<script>')&&page.includes('<title>Trip &lt;script&gt;alert(1)&lt;/script&gt;</title>'));
+ assert.ok(page.includes('Made with ClipAtlas on 2026-10-29.')&&page.includes('Save as PDF'));
+ const r=C.createRecord({url:'https://www.tiktok.com/@a/video/7345678901234567891',title:'Night <b>market</b>',city:'Taipei',country:'Taiwan',
+  places:[{name:'Raohe <img src=x>',type:'food',city:'Taipei',country:'Taiwan',address:'Raohe St',note:'pepper buns'}]});
+ const rep=C.placeReport([r]);
+ const html=C.reportHtml(rep,'Taiwan: places by city');
+ assert.ok(!html.includes('<img')&&html.includes('Raohe &lt;img src=x&gt;')&&html.includes('<td class="n">1</td>'));
+ assert.ok(html.includes('href="https://www.google.com/maps/search/?api=1&amp;query='),'map links are escaped attributes');
+ const rows=C.reportCsv(rep).split('\r\n');
+ assert.equal(rows[0],'﻿City,Country,Kind,Place,Sources,Also called,What to get or do,Address,Google Maps,From,Links');
+ assert.ok(rows[1].startsWith('Taipei,Taiwan,Food,Raohe <img src=x>,1,,pepper buns,Raohe St,https://www.google.com/maps/'));
+ const placeId=r.places[0].id;
+ const plan=[{id:'s1',recordId:r.id,placeId,day:2,note:'dinner'}];
+ const days=C.planRows(plan,[r],{1:['Taipei']});
+ assert.deepEqual(days.map(d=>[d.day,d.cities,d.stops.length]),[[1,['Taipei'],0],[2,[],1]],'a day with a city but no stops is kept');
+ const doc=C.planHtml(plan,[r],'Taiwan',{1:['Taipei']});
+ assert.ok(doc.includes('<h2>Day 1 · Taipei</h2><p><small>No stops yet.</small></p>')&&doc.includes('<h2>Day 2</h2>')&&doc.includes('dinner'));
+ const sheet=C.planCsv(plan,[r],{1:['Taipei']}).split('\r\n');
+ assert.equal(sheet.length,3);
+ assert.ok(sheet[1].startsWith('2,,1,Raohe <img src=x>,Food,pepper buns,Taipei,Taiwan,Raohe St,https://'));
+ assert.ok(sheet[1].endsWith(',dinner,,Night <b>market</b>,https://www.tiktok.com/@a/video/7345678901234567891'));
+ const topic={at:'2026-10-29T10:00:00Z',summary:'Hyatt wins',groups:[{name:'Transfers',points:[{text:'Chase → Hyatt 1:1',ids:[r.id,'gone']}]}]};
+ assert.ok(C.topicHtml(topic,'Cards',[r]).includes('<td>Chase → Hyatt 1:1</td><td class="n">2</td>'));
+ assert.equal(C.topicCsv(topic,[r]).split('\r\n')[1],'Transfers,Chase → Hyatt 1:1,2,Night <b>market</b>,https://www.tiktok.com/@a/video/7345678901234567891');
+});

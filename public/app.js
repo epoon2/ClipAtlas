@@ -81,6 +81,16 @@
     const a = document.createElement('a'); a.href=url; a.download=filename; a.style.display='none';
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url),1500);
   };
+  // Downloads anyone can open: a web page (any browser; print it to save a PDF) or a spreadsheet (CSV).
+  const fileSlug = text => String(text||'').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase().slice(0,60);
+  const saveAs = (base, csv, makeCsv, makeHtml) => csv
+    ? download(base+'.csv', makeCsv(), 'text/csv;charset=utf-8')
+    : download(base+'.html', makeHtml(), 'text/html;charset=utf-8');
+  const closeMenus = () => { for (const m of document.querySelectorAll('details.dl-menu[open]')) m.open = false; };
+  const dlMenu = (action, label = '↓ Download', cls = 'btn-subtle') => `<details class="dl-menu"><summary class="${cls}">${label}</summary><div class="dl-pop" role="group" aria-label="Download as">`
+    + `<button type="button" data-action="${action}" data-format="html"><span aria-hidden="true">📄</span> Document<small>Opens in any web browser. Print it to save a PDF.</small></button>`
+    + `<button type="button" data-action="${action}" data-format="csv"><span aria-hidden="true">📊</span> Spreadsheet<small>Excel, Google Sheets or Numbers</small></button></div></details>`;
+
   // The account's own categories (Settings), and its optional tabs.
   const categoryList = () => Array.isArray(state.categories) ? state.categories : [];
   const emojiFor = name => name === 'Unsorted' ? '✦' : (categoryList().find(c => c.name === name)?.emoji || '🔖');
@@ -178,8 +188,8 @@
         const src=C.askSources(recs,{budget:400000});
         const body=JSON.stringify(C.askRequest(C.askPrompt(question,{scope,sources:src.text,count:src.count,left:src.left})));
         for(let tries=0;tries<3&&!out;tries++){
-          askSay(`Reading ${plural(src.count,'item','items')} with Gemini…`);
-          const res=await geminiPost(body,'ask');
+          const stop=ticking(askSay,`Reading ${plural(src.count,'item','items')} with Gemini…`);
+          const res=await geminiPost(body,'ask').finally(stop);
           if(res.status==='ok'&&res.text){out={text:res.text,model:res.model,ids:src.ids,count:src.count};break;}
           if(res.stopRun){askSay(res.message);return false;}
           if(res.reason==='GEMINI_BUSY'){const wait=Math.min(60,Math.max(2,res.retryAfter||20));askSay(`Gemini asked to wait ${wait} seconds…`);await new Promise(ok=>setTimeout(ok,wait*1000));continue;}
@@ -245,17 +255,19 @@
       return `<article class="clip-card${clip?'':' kind-'+html(r.kind)}${selecting?' selecting':''}${selected.has(r.id)?' picked':''}" data-card="${html(r.id)}">${selecting?`<label class="pick"><input type="checkbox" data-pick="${html(r.id)}" ${selected.has(r.id)?'checked':''} aria-label="Select ${html(title)}"></label>`:''}<div class="clip-card-head"><span class="clip-emoji">${html(emojiFor(r.category))}</span><span class="card-flags">${flags}</span></div><div class="clip-body"><div class="category">${html(r.category)}</div>${r.autoSorted&&r.autoSorted.name===r.category&&r.autoSorted.words?.length?`<p class="sorted-why" title="Sorted automatically by these sort words">Sorted by: ${html(r.autoSorted.words.join(', '))}</p>`:''}<h3>${html(title)}</h3><p class="location">${html([host,loc||(clip?'Location not yet identified':'')].filter(Boolean).join(' · ')||'No place yet')}${r.savedAt?' · Saved '+html(r.savedAt):''}</p>${placeLine}${about?`<p class="clip-notes">${html(about)}</p>`:''}<div class="chips">${chips.map(t=>`<span class="chip">${html(t)}</span>`).join('')}</div></div><div class="clip-actions">${actions}<button data-action="edit" data-id="${html(r.id)}">Edit</button>${tabOn('itinerary')?`<button data-action="plan" data-id="${html(r.id)}">${inPlan?'✓ Planned':'+ Plan'}</button>`:''}<button class="danger" data-action="delete" data-id="${html(r.id)}" aria-label="Delete ${clip?'clip':r.kind==='link'?'web page':'note'}">✕</button></div></article>`;
     }).join('');
   }
+  // "Asking Gemini… 12 s": the line counts up while the AI works, so it is plainly not stuck.
+  function ticking(say,text){const start=Date.now();say(text);const t=setInterval(()=>say(`${text} ${Math.round((Date.now()-start)/1000)} s`),1000);return ()=>clearInterval(t);}
   /* ---- What a collection is for: set up once, used by its research view and Ask ---- */
   const collInfo=name=>name?(state.collectionInfo||{})[name]||null:null;
   // One AI request that answers in JSON: Gemini's stronger models first, then Cloudflare's.
-  async function aiJSON(request,promptText,read,say=()=>{},fallback=null){
+  async function aiJSON(request,promptText,read,say=()=>{},fallback=null,purpose='ask'){
     if(!aiConfigLoaded){await loadAIConfig();aiConfigLoaded=true;}
     let why='';
     if(aiConfig.gemini){
       const body=JSON.stringify(request);
       for(let tries=0;tries<3;tries++){
-        say('Asking Gemini…');
-        const res=await geminiPost(body,'ask');
+        const stop=ticking(say,'Asking Gemini…');
+        const res=await geminiPost(body,purpose).finally(stop);
         if(res.status==='ok'){const v=read(res.text);if(v)return {value:v,model:res.model};why='the answer was not readable';break;}
         if(res.stopRun)return {error:res.message};
         why=res.detail||res.reason||'';
@@ -264,13 +276,14 @@
       }
     }
     if(aiConfig.cloudflare){
-      say('Asking Cloudflare’s AI…');
+      const stop=ticking(say,'Asking Cloudflare’s AI…');
       try{const r=await fetch('/api/ask',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
           body:JSON.stringify({prompt:(fallback?fallback.prompt:promptText).slice(0,280000)+'\n\nReply with only the JSON object.'})});
         const res=await r.json().catch(()=>({}));
         if(res.status==='ok'){const v=(fallback?fallback.read:read)(res.text);if(v)return {value:v,model:res.model};why='the answer was not readable';}
         else why=res.reason==='AI_DAILY_LIMIT'?'both free AI allowances are used up for today':(res.error||res.detail||res.reason||why);
       }catch(_){why='connection problem';}
+      finally{stop();}
     }
     return {error:why||'no AI is set up (see the README: Gemini or Cloudflare)'};
   }
@@ -304,7 +317,7 @@
     btn.disabled=true;
     try{
       const prompt=C.groupsPrompt({collection:name,kind:collKind,about:$('#collAbout').value,titles:recs.map(r=>r.title||r.place||r.auto?.summary||'').filter(Boolean)});
-      const out=await aiJSON(C.groupsRequest(prompt),prompt,C.readGroups,t=>{$('#collStatus').textContent=t;});
+      const out=await aiJSON(C.groupsRequest(prompt),prompt,C.readGroups,t=>{$('#collStatus').textContent=t;},null,'quick');
       if(out.error){$('#collStatus').textContent=`That did not work: ${out.error}.`;return;}
       setCollGroups(out.value);$('#collStatus').textContent='Suggested. Rename, remove or add any.';
     }finally{btn.disabled=false;}
@@ -327,7 +340,7 @@
     if(!info){box.innerHTML=`<div class="topic-empty"><p>Tell ClipAtlas what <strong>${html(name||'this')}</strong> is for, and it sorts what these sources say into groups that fit, with how many sources say each thing.</p><button type="button" class="btn-primary" data-action="coll-setup">Set it up</button></div>`;return;}
     const report=(state.reports||{})[name],byId=new Map(state.records.map(r=>[r.id,r]));
     const changed=report?records.filter(r=>String(r.updatedAt||r.createdAt||'')>report.at).length+Math.max(0,records.length-report.count):0;
-    let s=`<div class="report-head"><p>Sorted into: ${info.groups.map(g=>`<span class="chip" title="${html(g.hint)}">${html(g.name)}</span>`).join(' ')} <button type="button" class="link-inline" data-action="coll-setup">Change</button></p><div class="report-actions-head"><button type="button" class="btn-primary" data-action="topic-build"${topicBuilding?' disabled':''}>${report?'↻ Rebuild the research':'✦ Build the research'}</button>${report?'<button type="button" class="btn-subtle" data-action="report-download">↓ Download</button>':''}</div></div><p class="hint" id="topicStatus" role="status" aria-live="polite">${report?html(`Built ${new Date(report.at).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} from ${plural(report.count,'item','items')}${report.model?' · '+report.model:''}`)+(changed?` · <strong>${plural(changed,'item is','items are')} new or changed since</strong>`:''):`The AI reads every item here and sorts what they say into these groups. Each point shows how many sources say it.`}</p>`;
+    let s=`<div class="report-head"><p>Sorted into: ${info.groups.map(g=>`<span class="chip" title="${html(g.hint)}">${html(g.name)}</span>`).join(' ')} <button type="button" class="link-inline" data-action="coll-setup">Change</button></p><div class="report-actions-head"><button type="button" class="btn-primary" data-action="topic-build"${topicBuilding?' disabled':''}>${report?'↻ Rebuild the research':'✦ Build the research'}</button>${report?dlMenu('report-download'):''}</div></div><p class="hint" id="topicStatus" role="status" aria-live="polite">${report?html(`Built ${new Date(report.at).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})} from ${plural(report.count,'item','items')}${report.model?' · '+report.model:''}`)+(changed?` · <strong>${plural(changed,'item is','items are')} new or changed since</strong>`:''):`The AI reads every item here and sorts what they say into these groups. Each point shows how many sources say it.`}</p>`;
     if(report){
       if(report.summary)s+=`<p class="topic-summary">${html(report.summary)}</p>`;
       for(const g of report.groups){
@@ -374,7 +387,7 @@
     if(prompt.list.length<2){toast('There is nothing to compare yet.');return;}
     sameBusy=true;btn.disabled=true;const old=btn.textContent;btn.textContent='✦ Looking…';
     try{
-      const out=await aiJSON(C.samePlacesRequest(prompt.text),prompt.text,t=>C.readSamePlaces(t,prompt.list));
+      const out=await aiJSON(C.samePlacesRequest(prompt.text),prompt.text,t=>C.readSamePlaces(t,prompt.list),t=>{btn.textContent=t.replace('Asking Gemini…','✦ Looking…');},null,'quick');
       if(out.error){toast(`That did not work: ${out.error}.`);return;}
       samePreview={groups:out.value};renderLibrary();
     }finally{sameBusy=false;btn.disabled=false;btn.textContent=old;}
@@ -388,7 +401,7 @@
     if(!records.length){box.innerHTML='';return;}
     if(!rep.places){box.innerHTML='<div class="day-empty">No places found in these yet. Auto-review lists the places each clip names or shows (✦ Read does it for a web page or note).</div>';return;}
     const dayOf=C.planDays(state.plan),named=rep.cities.filter(c=>c.name);
-    let s=`<div class="report-head"><p><strong>${plural(rep.places,'place','places')}</strong> in ${plural(named.length,'city','cities')}, from ${plural(records.length,'item','items')}${rep.unnamed?` (${rep.unnamed} ${rep.unnamed===1?'names':'name'} no place)`:''}. In each city: food, shopping, sights, activities, then places to stay. The number by each place is how many sources name it; the most named come first.</p><div class="report-actions-head"><button type="button" class="btn-subtle" data-action="same-places" title="Let the AI find places listed twice under different names (another spelling, a short form, Chinese and English)">✦ Find the same places</button><button type="button" class="btn-subtle" data-action="report-download">↓ Download</button></div></div>`;
+    let s=`<div class="report-head"><p><strong>${plural(rep.places,'place','places')}</strong> in ${plural(named.length,'city','cities')}, from ${plural(records.length,'item','items')}${rep.unnamed?` (${rep.unnamed} ${rep.unnamed===1?'names':'name'} no place)`:''}. In each city: food, shopping, sights, activities, then places to stay. The number by each place is how many sources name it; the most named come first.</p><div class="report-actions-head"><button type="button" class="btn-subtle" data-action="same-places" title="Let the AI find places listed twice under different names (another spelling, a short form, Chinese and English)">✦ Find the same places</button>${dlMenu('report-download')}</div></div>`;
     s+=`<div id="sameBox" class="same-box"${samePreview?'':' hidden'}>${samePreview?sameHtml():''}</div>`;
     if(rep.top.length)s+=`<div class="report-top"><strong>Most mentioned</strong> ${rep.top.map(t=>`<span class="chip">${html(t.name)} <b>${t.count}</b></span>`).join(' ')}</div>`;
     if(named.length>1)s+=`<nav class="city-jump" aria-label="Cities">${named.map(c=>`<button type="button" class="chip" data-action="report-jump" data-city="${html(c.name.toLowerCase())}">${html(c.name)} <small>${c.count}</small></button>`).join('')}</nav>`;
@@ -531,8 +544,8 @@
       if(aiConfig.gemini){
         const body=JSON.stringify(C.planAIRequest(prompt.text));
         for(let tries=0;tries<3&&!answer;tries++){
-          say(`Planning with Gemini from ${plural(prompt.count,'saved place','saved places')}…`);
-          const res=await geminiPost(body,'ask');
+          const stop=ticking(say,`Planning with Gemini from ${plural(prompt.count,'saved place','saved places')}…`);
+          const res=await geminiPost(body,'ask').finally(stop);
           if(res.status==='ok'){answer=C.readPlanAnswer(res.text,prompt.keys,state.dayCount);if(!answer)why='the answer had no plan in it';break;}
           if(res.stopRun){say(res.message);return;}
           why=res.detail||res.reason||'';
@@ -1809,11 +1822,14 @@
       return {status:'failed',reason:'AI_FAILED',detail:res.detail||res.reason,via:'Gemini'};
     }
   }
+  // The Worker gives up on a slow model and asks the next one; this is the last stop if the whole request hangs.
+  const GEMINI_WAIT={clip:160000,ask:110000,quick:70000};
   async function geminiPost(body,purpose='clip'){
-    let res,data;
-    try{res=await fetch('/api/gemini'+(purpose==='ask'?'?for=ask':''),{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body});
+    let res,data;const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),GEMINI_WAIT[purpose]||GEMINI_WAIT.clip);
+    try{res=await fetch('/api/gemini'+(purpose==='clip'?'':'?for='+purpose),{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body,signal:ctl.signal});
       data=await res.json().catch(()=>({}));}
-    catch(_){return {status:'failed',reason:'GEMINI_FAILED',detail:'connection problem',retryAfter:5};}
+    catch(err){return {status:'failed',reason:'GEMINI_FAILED',detail:err&&err.name==='AbortError'?'Gemini took too long to answer':'connection problem',retryAfter:5};}
+    finally{clearTimeout(timer);}
     if(res.status===401)return {stopRun:true,message:'Your sign-in expired. Sign in again, then start again.'};
     if(data.reason==='CLIPATLAS_LIMIT')return {stopRun:true,message:data.error};
     if(!data.status)return {status:'failed',reason:'GEMINI_FAILED',detail:'answered '+res.status};
@@ -1971,10 +1987,14 @@
       else if(kind==='plan-ai-example'){const box=$('#planAIInput'),v=box.value.trim();box.value=v?v.replace(/[.;,]?$/,'; ')+action.dataset.q.toLowerCase():action.dataset.q;box.focus();}
       else if(kind==='plan-ai-use')usePlanProposal();
       else if(kind==='plan-ai-discard'){planProposal=null;renderPlanAI();}
-      else if(kind==='report-download'){const name=activeCollection||'Saved places',slug=name.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase()||'research';
+      else if(kind==='report-download'){const name=activeCollection||'Saved places',slug=fileSlug(name)||'research',csv=action.dataset.format==='csv';
         const report=(state.reports||{})[activeCollection],topics=C.collectionLayout(collInfo(activeCollection),scopeRecords())==='topics';
-        if(topics&&report)download(`${slug}-research.md`,C.topicMarkdown(report,`${name}: research`,state.records),'text/markdown');
-        else if(lastReport)download(`${slug}-places-by-city.md`,C.reportMarkdown(lastReport,`${name}: places by city`),'text/markdown');}
+        if(topics&&report)saveAs(`${slug}-research`,csv,()=>C.topicCsv(report,state.records),()=>C.topicHtml(report,`${name}: research`,state.records));
+        else if(lastReport)saveAs(`${slug}-places-by-city`,csv,()=>C.reportCsv(lastReport),()=>C.reportHtml(lastReport,`${name}: places by city`));
+        closeMenus();}
+      else if(kind==='plan-download'){const csv=action.dataset.format==='csv';
+        saveAs((fileSlug(state.tripTitle)||'clipatlas')+'-itinerary',csv,()=>C.planCsv(state.plan,state.records,state.dayCities),()=>C.planHtml(state.plan,state.records,state.tripTitle,state.dayCities));
+        closeMenus();}
       else if(kind==='report-jump'){const sec=[...$$('#placesReport .report-city')].find(x=>x.dataset.reportCity===action.dataset.city);if(sec)sec.scrollIntoView({behavior:'smooth',block:'start'});}
       else if(kind==='ask-example'){$('#askInput').value=action.dataset.q;$('#askForm').requestSubmit();}
       else if(kind==='edit-item')openEditor(id,'tiktok',action.dataset.place||'');
@@ -2080,7 +2100,9 @@
     const exportCSV=()=>download('clipatlas-library.csv',C.recordsToCSV(state.records),'text/csv;charset=utf-8');
     $('#exportCsv').addEventListener('click',exportCSV);$('#exportCsvImport').addEventListener('click',exportCSV);
     $('#downloadTemplate').addEventListener('click',()=>download('clipatlas-import-template.csv',C.csvTemplate(),'text/csv;charset=utf-8'));
-    $('#exportPlan').addEventListener('click',()=>download('clipatlas-itinerary.md',C.planMarkdown(state.plan,state.records,state.tripTitle,state.dayCities),'text/markdown;charset=utf-8'));
+    // A download menu closes when you click elsewhere or press Escape.
+    document.addEventListener('click',e=>{for(const m of $$('details.dl-menu[open]'))if(!m.contains(e.target))m.open=false;});
+    document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;const m=document.querySelector('details.dl-menu[open]');if(m){m.open=false;m.querySelector('summary').focus();}});
     $('#fileImport').addEventListener('change',e=>importFile(e.target.files?.[0]));
     const drop=$('#dropZone');
     for(const name of ['dragover','dragenter'])drop.addEventListener(name,e=>{e.preventDefault();drop.classList.add('dragging');});

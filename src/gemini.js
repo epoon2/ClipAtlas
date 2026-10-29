@@ -21,6 +21,10 @@
 // where reasoning counts more, to Flash first.
 export const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-3.6-flash'];
 export const GEMINI_ASK_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+// How long one model may take before the next is asked, and the whole request at most (Google
+// sometimes holds a request a long time when a model is busy). Quick jobs (suggesting groups,
+// finding the same places) go to the fast Flash-Lite models first.
+export const GEMINI_TIMEOUTS = { clip: [90000, 150000], ask: [45000, 100000], quick: [25000, 60000] };
 export const GEMINI_MAX = 19 * 1024 * 1024;   // Google takes at most 20 MB inline in one request
 const API = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -32,7 +36,7 @@ export function resetGeminiForTests() { for (const k of Object.keys(working)) de
 
 const clip = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 
-/** The models to try, in order: for clips (GEMINI_MODELS) or for questions (GEMINI_ASK_MODELS). */
+/** The models to try, in order: for clips and quick jobs (GEMINI_MODELS) or for questions (GEMINI_ASK_MODELS). */
 export function modelList(env, purpose = 'clip') {
   const own = String(env && (purpose === 'ask' ? env.GEMINI_ASK_MODELS : env.GEMINI_MODELS) || '').split(',').map(s => s.trim()).filter(s => /^[a-z0-9.-]{3,60}$/.test(s));
   return own.length ? own : purpose === 'ask' ? GEMINI_ASK_MODELS : GEMINI_MODELS;
@@ -65,11 +69,13 @@ export function readGeminiError(status, body) {
   if (/API_KEY_INVALID|API_KEY/.test(reasons) || /api key not valid|api key/i.test(message) || status === 401) return { kind: 'key', retryAfter: 0, detail: message };
   if (/location is not supported|not available in your country/i.test(message)) return { kind: 'region', retryAfter: 0, detail: message };
   if (status === 404 || /is not found|not supported for generateContent|no longer available|deprecated/i.test(message)) return { kind: 'model', retryAfter: 0, detail: message };
+  // A setting this model does not take (a thinking level): the next model may take it.
+  if (status === 400 && /thinking/i.test(message)) return { kind: 'setting', retryAfter: 0, detail: message };
   if (status === 403) return { kind: 'key', retryAfter: 0, detail: message };
   return { kind: 'other', retryAfter: status >= 500 ? 5 : 0, detail: message || `HTTP ${status}` };
 }
 
-const REASONS = { minute: 'GEMINI_BUSY', day: 'GEMINI_DAILY_LIMIT', key: 'GEMINI_KEY', region: 'GEMINI_REGION', model: 'GEMINI_NO_MODEL', not_free: 'GEMINI_NO_MODEL', other: 'GEMINI_FAILED' };
+const REASONS = { minute: 'GEMINI_BUSY', day: 'GEMINI_DAILY_LIMIT', key: 'GEMINI_KEY', region: 'GEMINI_REGION', model: 'GEMINI_NO_MODEL', not_free: 'GEMINI_NO_MODEL', setting: 'GEMINI_FAILED', other: 'GEMINI_FAILED' };
 
 /** The text of Google's answer, how it ended and how many tokens it used. */
 export function readGeminiReply(body) {
@@ -86,8 +92,8 @@ export function readGeminiReply(body) {
  * takes it. Never throws. {status: 'ok', model, text, finish, usage} or
  * {status: 'failed', reason, detail, retryAfter, model} with ``http`` for the page.
  */
-export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip') {
-  const now = Date.now();
+export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip', timeouts = GEMINI_TIMEOUTS[purpose] || GEMINI_TIMEOUTS.clip) {
+  const now = Date.now(), [perModel, total] = timeouts;
   const all = modelList(env, purpose), last_ = working[purpose];
   const order = [...(last_ && all.includes(last_) ? [last_] : []), ...all.filter(m => m !== last_)]
     .filter(m => !(skip.get(m) && skip.get(m).until > now));
@@ -99,14 +105,20 @@ export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip') 
   }
   let last = null, day = null;
   for (const model of order) {
+    const left = now + total - Date.now();
+    if (left < 3000) { last = last || { status: 'failed', reason: 'GEMINI_FAILED', http: 504, retryAfter: 5, model, detail: 'gemini: took too long' }; break; }
     let res, data;
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), Math.min(perModel, left));
     try {
-      res = await fetcher(API + encodeURIComponent(model) + ':generateContent', { method: 'POST', body,
+      res = await fetcher(API + encodeURIComponent(model) + ':generateContent', { method: 'POST', body, signal: ctl.signal,
         headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY } });
       data = await res.json().catch(() => ({}));
     } catch (err) {
-      return { status: 'failed', reason: 'GEMINI_FAILED', http: 502, retryAfter: 5, model, detail: clip(`gemini: ${err && err.message || err}`, 300) };
-    }
+      // Too slow (or the connection dropped): the next model is asked, within the time left.
+      last = { status: 'failed', reason: 'GEMINI_FAILED', http: 504, retryAfter: 5, model,
+        detail: clip(err && err.name === 'AbortError' ? `gemini (${model}): no answer within ${Math.round(Math.min(perModel, left) / 1000)} seconds` : `gemini: ${err && err.message || err}`, 300) };
+      continue;
+    } finally { clearTimeout(timer); }
     if (res.ok) {
       working[purpose] = model;
       const reply = readGeminiReply(data);
@@ -121,7 +133,7 @@ export async function relayGemini(body, env, fetcher = fetch, purpose = 'clip') 
     // Used up for today on this model: another model may still have requests left today.
     if (e.kind === 'day') { skip.set(model, { until: now + 3600_000, why: 'day' }); if (working[purpose] === model) delete working[purpose]; day = last; continue; }
     // Google busy or down for this model (503 "overloaded", 500): the next model may answer; it is not skipped later.
-    if (e.kind === 'other' && res.status >= 500) continue;
+    if ((e.kind === 'other' && res.status >= 500) || e.kind === 'setting') continue;
     return last;
   }
   // Every model refused: "used up for today" says more than "no such model".

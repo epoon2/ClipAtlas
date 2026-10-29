@@ -937,7 +937,7 @@
   function topicReportRequest(prompt, names) {
     const str = { type: 'STRING' };
     return { contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 16384, responseMimeType: 'application/json',
+      generationConfig: { temperature: 0.2, maxOutputTokens: 16384, thinkingConfig: THINK_LOW, responseMimeType: 'application/json',
         responseSchema: { type: 'OBJECT', propertyOrdering: ['groups', 'summary'], required: ['groups'], properties: {
           groups: { type: 'ARRAY', items: { type: 'OBJECT', propertyOrdering: ['name', 'points'], required: ['name', 'points'], properties: {
             name: { type: 'STRING', format: 'enum', enum: uniq([...names, 'Other']) },
@@ -1014,6 +1014,9 @@
     return out;
   }
 
+  /* Gemini 3 models think before answering ("medium" by default on Flash), which can take a minute
+     on a long request. Low is enough for questions, plans and sorting, and answers in seconds. */
+  const THINK_LOW = { thinkingLevel: 'low' };
   /* ---- Plan with AI: the person says what they want, the AI arranges saved places --- */
   const PLAN_TIMES = ['breakfast', 'morning', 'lunch', 'afternoon', 'dinner', 'night'];
   const PLAN_TIME_LABELS = { breakfast: '🍳 Breakfast', morning: '☀️ Morning', lunch: '🍜 Lunch', afternoon: '🌤️ Afternoon', dinner: '🍽️ Dinner', night: '🌙 Night' };
@@ -1063,7 +1066,7 @@
     const stop = { type: 'OBJECT', propertyOrdering: ['place', 'time', 'why'], required: ['place', 'time'],
       properties: { place: { type: 'INTEGER' }, time: { type: 'STRING', format: 'enum', enum: PLAN_TIMES }, why: str } };
     return { contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 8192, responseMimeType: 'application/json',
+      generationConfig: { temperature: 0.3, maxOutputTokens: 8192, thinkingConfig: THINK_LOW, responseMimeType: 'application/json',
         responseSchema: { type: 'OBJECT', propertyOrdering: ['days', 'missing', 'summary'], required: ['days'],
           properties: { days: { type: 'ARRAY', items: { type: 'OBJECT', propertyOrdering: ['day', 'stops'], required: ['day', 'stops'],
             properties: { day: { type: 'INTEGER' }, stops: { type: 'ARRAY', items: stop } } } },
@@ -1354,7 +1357,7 @@
   }
   /** The Gemini request body for a question. */
   function askRequest(prompt) {
-    return { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 8192 } };
+    return { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 8192, thinkingConfig: THINK_LOW } };
   }
   const escapeHtml = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   /** An answer's short Markdown as safe HTML: headings, nested lists, bold, code,
@@ -1552,5 +1555,113 @@
     }
     return out + '> Locations, opening hours and travel times have not been independently verified.\n';
   }
-  return { placeNameKey, aliasKey, cleanAliases, samePlacesPrompt, samePlacesRequest, readSamePlaces, mergePlaces, separatePlace, COLLECTION_KINDS, suggestedGroups, cleanGroups, cleanCollectionInfo, collectionLayout, groupsPrompt, groupsRequest, readGroups, topicReportPrompt, topicReportRequest, readTopicReport, cleanReports, topicMarkdown, PLAN_TIMES, PLAN_TIME_LABELS, planAIPrompt, planAIRequest, readPlanAnswer, planFromAnswer, placeStops, placeReport, reportMarkdown, mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
+
+  /* ---- Downloads anyone can open: a document (a web page any browser opens, and prints to a PDF)
+     and a spreadsheet (CSV, for Excel, Google Sheets or Numbers) ---------------------------------- */
+  const EXPORT_CSS = [
+    'body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#1d2b2f;background:#fff;margin:0;line-height:1.5;font-size:15px}',
+    'main{max-width:960px;margin:0 auto;padding:28px 20px 48px}h1{font-size:28px;margin:0 0 4px}h2{font-size:21px;margin:30px 0 8px;padding-top:10px;border-top:2px solid #d9e4df}',
+    'h3{font-size:16px;margin:18px 0 6px;color:#2f6c5f}.sub{margin:0 0 4px;color:#3f5b55}.meta{margin:0 0 18px;color:#6b7f78;font-size:13px}',
+    'table{width:100%;border-collapse:collapse;margin:6px 0 14px;font-size:14px}th,td{text-align:left;vertical-align:top;padding:7px 8px;border-bottom:1px solid #e3ebe6}',
+    'th{background:#f1f6f3;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#41605a}td.n{text-align:right;white-space:nowrap;font-weight:700}',
+    'a{color:#1f6f5c}.top{background:#fff7e6;border:1px solid #f0dcae;border-radius:8px;padding:8px 12px}.summary{background:#f4f8f5;border-radius:8px;padding:10px 14px}',
+    'small{color:#6b7f78}@media print{body{font-size:11pt}main{padding:0;max-width:none}a{color:#1d2b2f}h2{break-after:avoid}tr{break-inside:avoid}.meta .tip{display:none}}'].join('');
+  const esc = escapeHtml;
+  const linkTo = (url, text) => /^https?:\/\//i.test(safeString(url)) ? `<a href="${esc(url)}">${esc(text)}</a>` : esc(text);
+  function htmlDocument(title, body, { subtitle = '', made = isoNow() } = {}) {
+    return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${EXPORT_CSS}</style></head>`
+      + `<body><main><header><h1>${esc(title)}</h1>${subtitle ? `<p class="sub">${esc(subtitle)}</p>` : ''}<p class="meta">Made with ClipAtlas on ${esc(safeString(made).slice(0, 10))}.<span class="tip"> To keep it as a PDF, print this page (Ctrl+P, or ⌘P on a Mac) and choose Save as PDF.</span></p></header>${body}</main></body></html>\n`;
+  }
+  /** A spreadsheet file: UTF-8 with a byte-order mark (so Excel shows Chinese and accents), and no cell a
+      spreadsheet would run as a formula. */
+  function csvDocument(header, rows) {
+    const cell = v => { const t = safeString(v); return csvEscape(/^[=+\-@\t\r]/.test(t) ? "'" + t : t); };
+    return '\ufeff' + [header, ...rows].map(r => r.map(cell).join(',')).join('\r\n') + '\r\n';
+  }
+  const sourceCount = n => n === 1 ? '1 source' : n + ' sources';
+  const fromLinks = sources => sources.map(x => linkTo(x.url, x.title)).join(', ');
+
+  /** Places by city as a document: each city, each kind, a table of places with how many sources name each. */
+  function reportHtml(report, title) {
+    const cities = report.cities.filter(c => c.name).length;
+    let body = `<p class="summary">${report.places} places in ${cities} ${cities === 1 ? 'city' : 'cities'}. The number by each place is how many of your saved sources name it.${report.unnamed ? ` ${report.unnamed} saved ${report.unnamed === 1 ? 'item names' : 'items name'} no place.` : ''}</p>`;
+    if ((report.top || []).length) body += `<p class="top"><strong>Most mentioned:</strong> ${report.top.map(t => `${esc(t.name)} (${t.count})`).join(', ')}</p>`;
+    for (const c of report.cities) {
+      body += `<h2>${esc(c.name ? c.name + (c.country ? ', ' + c.country : '') : 'City not known yet')} <small>${c.count} ${c.count === 1 ? 'place' : 'places'}</small></h2>`;
+      for (const g of c.groups) {
+        body += `<h3>${PLACE_EMOJI[g.type]} ${PLACE_LABELS[g.type]} (${g.places.length})</h3><table><thead><tr><th scope="col">Place</th><th scope="col">Sources</th><th scope="col">What to get or do</th><th scope="col">Address and map</th><th scope="col">From</th></tr></thead><tbody>`;
+        for (const p of g.places) {
+          const map = mapsUrl({ name: p.name, address: p.address, city: c.name, country: c.country });
+          body += `<tr><td><strong>${esc(p.name)}</strong>${(p.also || []).length ? `<br><small>Also called ${esc(p.also.join(', '))}</small>` : ''}</td><td class="n">${p.sources.length}</td><td>${esc(p.notes.join('; '))}</td>`
+            + `<td>${esc(p.address)}${map ? `${p.address ? '<br>' : ''}<a href="${esc(map)}">Google Maps</a>` : ''}</td><td>${fromLinks(p.sources)}</td></tr>`;
+        }
+        body += '</tbody></table>';
+      }
+    }
+    return htmlDocument(title, body);
+  }
+  function reportCsv(report) {
+    const rows = [];
+    for (const c of report.cities) for (const g of c.groups) for (const p of g.places)
+      rows.push([c.name || '(city not known)', c.country, PLACE_LABELS[g.type], p.name, p.sources.length, (p.also || []).join('; '), p.notes.join('; '), p.address,
+        mapsUrl({ name: p.name, address: p.address, city: c.name, country: c.country }), p.sources.map(x => x.title).join('; '), p.sources.map(x => x.url).filter(Boolean).join(' ')]);
+    return csvDocument(['City', 'Country', 'Kind', 'Place', 'Sources', 'Also called', 'What to get or do', 'Address', 'Google Maps', 'From', 'Links'], rows);
+  }
+  /** Research by topic as a document: each group, a table of points with how many sources say each. */
+  function topicHtml(report, title, records = []) {
+    const byId = new Map(records.map(r => [r.id, r]));
+    let body = report.summary ? `<p class="summary">${esc(report.summary)}</p>` : '';
+    for (const g of report.groups) {
+      body += `<h2>${esc(g.name)} <small>${g.points.length} ${g.points.length === 1 ? 'point' : 'points'}</small></h2><table><thead><tr><th scope="col">Point</th><th scope="col">Sources</th><th scope="col">From</th></tr></thead><tbody>`;
+      for (const pt of g.points) {
+        const from = pt.ids.map(id => byId.get(id)).filter(Boolean).map(r => ({ title: safeString(r.title) || 'a saved item', url: r.url }));
+        body += `<tr><td>${esc(pt.text)}</td><td class="n">${pt.ids.length}</td><td>${fromLinks(from) || '<small>items since deleted</small>'}</td></tr>`;
+      }
+      body += '</tbody></table>';
+    }
+    return htmlDocument(title, body, { made: report.at || isoNow() });
+  }
+  function topicCsv(report, records = []) {
+    const byId = new Map(records.map(r => [r.id, r]));
+    const rows = report.groups.flatMap(g => g.points.map(pt => { const from = pt.ids.map(id => byId.get(id)).filter(Boolean);
+      return [g.name, pt.text, pt.ids.length, from.map(r => safeString(r.title) || 'a saved item').join('; '), from.map(r => r.url).filter(Boolean).join(' ')]; }));
+    return csvDocument(['Group', 'Point', 'Sources', 'From', 'Links'], rows);
+  }
+  /** The itinerary, day by day, as rows: what each stop is, where, and where it came from. */
+  function planRows(plan, records, dayCities = {}) {
+    const byId = new Map(records.map(v => [v.id, v])), days = new Map();
+    for (const day of Object.keys(dayCities || {}).map(Number)) if (day >= 1 && day <= MAX_DAYS && (dayCities[day] || []).length) days.set(day, []);
+    for (const entry of plan || []) {
+      const r = byId.get(entry.recordId); if (!r) continue;
+      const day = Math.max(1, Math.min(MAX_DAYS, Number(entry.day) || 1)), place = entry.placeId ? (r.places || []).find(p => p.id === entry.placeId) : null;
+      if (!days.has(day)) days.set(day, []);
+      const stop = place
+        ? { name: place.name, kind: PLACE_LABELS[placeType(place.type)], city: place.city || r.city, country: place.country || r.country, address: place.address || '', what: place.note || '',
+          map: mapsUrl({ ...place, city: place.city || r.city, country: place.country || r.country }) }
+        : { name: safeString(r.title) || safeString(r.place) || 'Saved item', kind: '', city: r.city, country: r.country, address: '', what: (r.places || []).map(p => p.name).join(', '),
+          map: mapsUrl({ name: r.place, city: r.city, country: r.country }) };
+      days.get(day).push({ ...stop, plan: safeString(entry.note), notes: safeString(r.notes), from: safeString(r.title) || (isClip(r) ? 'a saved TikTok' : r.kind === 'link' ? 'a saved page' : 'your note'), url: safeString(r.url) });
+    }
+    return [...days.entries()].sort((a, b) => a[0] - b[0]).map(([day, stops]) => ({ day, cities: ((dayCities || {})[day] || []).map(cityName).filter(Boolean), stops }));
+  }
+  function planHtml(plan, records, title, dayCities = {}) {
+    let body = '';
+    for (const d of planRows(plan, records, dayCities)) {
+      body += `<h2>Day ${d.day}${d.cities.length ? ' · ' + esc(d.cities.join(', ')) : ''}</h2>`;
+      if (!d.stops.length) { body += '<p><small>No stops yet.</small></p>'; continue; }
+      body += '<table><thead><tr><th scope="col">#</th><th scope="col">Stop</th><th scope="col">Where</th><th scope="col">Plan</th><th scope="col">From</th></tr></thead><tbody>';
+      d.stops.forEach((s, i) => {
+        body += `<tr><td class="n">${i + 1}</td><td><strong>${esc(s.name)}</strong>${s.kind ? `<br><small>${esc(s.kind)}</small>` : ''}${s.what ? `<br>${esc(s.what)}` : ''}</td>`
+          + `<td>${esc([s.city, s.country].filter(Boolean).join(', '))}${s.address ? `<br>${esc(s.address)}` : ''}${s.map ? `<br><a href="${esc(s.map)}">Google Maps</a>` : ''}</td>`
+          + `<td>${esc(s.plan)}${s.notes ? `${s.plan ? '<br>' : ''}<small>${esc(s.notes)}</small>` : ''}</td><td>${linkTo(s.url, s.from)}</td></tr>`;
+      });
+      body += '</tbody></table>';
+    }
+    return htmlDocument(safeString(title) || 'My trip', body + '<p><small>Locations, opening hours and travel times have not been independently verified.</small></p>');
+  }
+  function planCsv(plan, records, dayCities = {}) {
+    const rows = planRows(plan, records, dayCities).flatMap(d => d.stops.map((s, i) => [d.day, d.cities.join(', '), i + 1, s.name, s.kind, s.what, s.city, s.country, s.address, s.map, s.plan, s.notes, s.from, s.url]));
+    return csvDocument(['Day', 'Day cities', 'Order', 'Stop', 'Kind', 'What to get or do', 'City', 'Country', 'Address', 'Google Maps', 'Plan note', 'Your notes', 'From', 'Link'], rows);
+  }
+  return { htmlDocument, csvDocument, reportHtml, reportCsv, topicHtml, topicCsv, planRows, planHtml, planCsv, placeNameKey, aliasKey, cleanAliases, samePlacesPrompt, samePlacesRequest, readSamePlaces, mergePlaces, separatePlace, COLLECTION_KINDS, suggestedGroups, cleanGroups, cleanCollectionInfo, collectionLayout, groupsPrompt, groupsRequest, readGroups, topicReportPrompt, topicReportRequest, readTopicReport, cleanReports, topicMarkdown, PLAN_TIMES, PLAN_TIME_LABELS, planAIPrompt, planAIRequest, readPlanAnswer, planFromAnswer, placeStops, placeReport, reportMarkdown, mapsUrl, ITEM_KINDS, webLink, isClip, geminiTextRequest, ASK_KEEP, askSources, askPrompt, askRequest, renderAnswer, cleanQuestions, PLACE_TYPES, PLACE_LABELS, PLACE_EMOJI, placeType, cleanPlaces, tripItems, planDays, prunePlan, splitClipStop, geminiPrompt, geminiRequest, parseJsonReply, readGeminiAnswer, pacificMidnight, MAX_DAYS, cleanDayCount, cityList, cleanDayCities, dayForClip, cityBoard, tripCountries, tripItemsIn, tripOverview, suggestDays, autoFill, playerUrl, speedLabel, speedMissing, allowanceResets, pickShots, REVIEW_SCOPES, reviewQueue, reviewEdit, clipText, AUTO_LABELS, autoQueue, pieces, applyUnderstanding, removeRecords, restoreRecords, updateRecords, wavBytes, downsample, loudness, shotTimes, sigChange, sigFlat, STARTERS, LEGACY, ensureSetup, applyStarter, normalizeCategories, suggestCategory, sortUnsorted, renameCategory, deleteCategory, addMissingCategories, categoryName, ANALYSIS_LABELS, cleanLink, analysisState, needsAnalysis, parseTikTokURL, parseCSV, csvTemplate, recordsToCSV, extractTikTokFavorites, createRecord, mergeRecords, planMarkdown };
 });

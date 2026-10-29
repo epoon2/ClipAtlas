@@ -84,6 +84,35 @@ test('a model that is overloaded (503): the next one is asked, and the first is 
   assert.deepEqual([none.reason, down.calls.length], ['GEMINI_FAILED', GEMINI_MODELS.length], 'all overloaded: said as a failure after asking each once');
 });
 
+test('a model that does not answer in time: the next is asked; none in time: said as such, without waiting longer', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    const model = decodeURIComponent(/models\/([^:]+):generateContent/.exec(url)[1]);
+    calls.push(model);
+    if (model === GEMINI_MODELS[0]) return new Promise((ok, fail) => init.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; fail(e); }));
+    return new Response(JSON.stringify(ANSWER), { status: 200 });
+  };
+  const started = Date.now();
+  const r = await relayGemini(BODY, ENV, fetcher, 'quick', [60, 5000]);
+  assert.deepEqual([r.status, r.model, calls], ['ok', GEMINI_MODELS[1], [GEMINI_MODELS[0], GEMINI_MODELS[1]]]);
+  assert.ok(Date.now() - started < 1000);
+  resetGeminiForTests();
+  const hang = async (url, init) => new Promise((ok, fail) => init.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; fail(e); }));
+  const t0 = Date.now();
+  const none = await relayGemini(BODY, ENV, hang, 'ask', [40, 3200]);
+  assert.equal(none.reason, 'GEMINI_FAILED');
+  assert.match(none.detail, /no answer within|took too long/);
+  assert.ok(Date.now() - t0 < 3500, 'never longer than the whole limit');
+});
+
+test('a model that does not take the thinking setting: the next model is asked', async () => {
+  const g = fakeGoogle({ [GEMINI_ASK_MODELS[0]]: [[400, { error: { code: 400, status: 'INVALID_ARGUMENT', message: 'Thinking level minimal is not supported for this model.' } }]],
+    [GEMINI_ASK_MODELS[1]]: [[200, ANSWER]] });
+  const r = await relayGemini(BODY, ENV, g.fetcher, 'ask');
+  assert.deepEqual([r.status, r.model], ['ok', GEMINI_ASK_MODELS[1]]);
+  assert.equal(readGeminiError(400, { error: { message: 'Unknown name "thinkingLevel"' } }).kind, 'setting');
+});
+
 test('a wrong key is not retried on other models; a model list can be set', async () => {
   const g = fakeGoogle({ [GEMINI_MODELS[0]]: [[400, { error: { message: 'API key not valid.', details: [{ reason: 'API_KEY_INVALID' }] } }]] });
   const r = await relayGemini(BODY, ENV, g.fetcher);
@@ -136,6 +165,9 @@ test('/api/ai-config and /api/gemini', async () => {
     assert.equal(new TextDecoder().decode(g.calls.at(-1).body), '{"contents":[{"parts":[{"text":"hi"}]}]}', 'passed on as sent');
     const asked = await (await call('gemini?for=ask', env({ GEMINI_API_KEY: 'k' }), { method: 'POST', body: '{}' })).json();
     assert.equal(asked.model, GEMINI_ASK_MODELS[0], 'a question goes to the stronger model');
+    resetGeminiForTests();
+    const quick = await (await call('gemini?for=quick', env({ GEMINI_API_KEY: 'k' }), { method: 'POST', body: '{}' })).json();
+    assert.equal(quick.model, GEMINI_MODELS[0], 'a quick job goes to the fast model');
     const big = await call('gemini', env({ GEMINI_API_KEY: 'k' }), { method: 'POST', body: 'x'.repeat(20 * 1024 * 1024) });
     assert.equal(big.status, 413);
     const capped = env({ GEMINI_API_KEY: 'k', AUTO_REVIEW_DAILY_LIMIT: '1' });

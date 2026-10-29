@@ -104,7 +104,8 @@ async function handle(req,env){const url=new URL(req.url),path=url.pathname,meth
   if(await blocked(env,'gemini:'+user.id,clips*2,86400000))return response({status:'failed',reason:'CLIPATLAS_LIMIT',error:`Auto-review limit reached (${clips} clips a day); continue tomorrow.`},429);
   const body=await req.arrayBuffer();
   if(!body.byteLength||body.byteLength>GEMINI_MAX)return response({status:'failed',reason:'BAD_INPUT',error:'That clip is too large to send.'},413);
-  const out=await relayGemini(body,env,fetch,url.searchParams.get('for')==='ask'?'ask':'clip');const {http,...rest}=out;
+  const purpose=['ask','quick'].includes(url.searchParams.get('for'))?url.searchParams.get('for'):'clip';
+  const out=await relayGemini(body,env,fetch,purpose);const {http,...rest}=out;
   return response(rest,out.status==='ok'?200:http||502);
  }
  // Auto-review setup check: each model once on a tiny test sound and picture, with the real error if one fails.
